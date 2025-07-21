@@ -96,6 +96,10 @@ def simulate_epidemic(params, use_sir=False):
     np.fill_diagonal(contact_matrix, 1.0)
     gamma_matrix = np.full((n_layers, n_ages), GAMMA)
     rows = []
+    # For low-level persistence: set a minimum infection+exposed threshold and reseed if below
+    infection_floor_threshold = max(5, int(0.0005 * N))  # e.g., 0.05% of population or at least 5
+    reseed_interval = 7  # days between possible reseeding events
+    reseed_size = max(1, int(0.0002 * N))  # e.g., 0.02% of population or at least 1
     for t in range(days):
         beta_t = np.full((n_layers, n_ages), beta_base)
         # Mask effect (configurable)
@@ -126,12 +130,22 @@ def simulate_epidemic(params, use_sir=False):
         eff_I = I.copy()
         if quarantine:
             eff_I = (I * (1 - QUARANTINE_EFFECT_SCALING)).astype(int)
-        # Travel: import new exposed cases into random groups/layers
+        # Travel: import new exposed cases into random groups/layers (stochastic)
         if travel and travel_max > 0:
-            for _ in range(travel_max):
+            # Vary travel_max stochastically each day (0 to travel_max)
+            today_travel = rng.integers(0, travel_max + 1)
+            for _ in range(today_travel):
                 l = rng.integers(0, n_layers)
                 a = rng.integers(0, n_ages)
                 E[l, a] += 1
+        # Low-level persistence: reseed if total infected+exposed is very low, every reseed_interval days
+        if (t % reseed_interval == 0) and ((I.sum() + E.sum()) < infection_floor_threshold):
+            for _ in range(reseed_size):
+                l = rng.integers(0, n_layers)
+                a = rng.integers(0, n_ages)
+                if S[l, a] > 0:
+                    S[l, a] -= 1
+                    E[l, a] += 1
         # Vaccination: remove susceptibles and add to recovered for all groups
         if vaccination:
             for l in range(n_layers):

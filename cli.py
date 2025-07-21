@@ -34,20 +34,29 @@ Modes:
   interact           Interactive mode (prompts for parameters)
   batch [N]          Generate a batch of N random datasets (default N=5)
 
-Options:
-  --sir              Use SIR model instead of SEIR (default: SEIR)
-  --plots            Save plots (default: enabled)
-  --no-plots         Do not save plots
-  --seasonal_amp     Amplitude for seasonality (e.g. 0.3)
-  --seasonal_period  Period for seasonality in days (e.g. 120)
-  --seasonal_phase   Phase offset for seasonality (e.g. 0)
-  --wave_ramps       Comma-separated ramp widths for each wave (e.g. 7,10)
-  --wave_durations   Comma-separated durations for each wave (e.g. 40,60)
-  --help             Show this help message and exit
+Options (for batch or single run):
+  --days             Number of days
+  --mask_score       Mask adherence 1-10
+  --crowdedness_score Crowdedness 1-10
+  --quarantine_enabled y/n
+  --vaccination_enabled y/n
+  --travel_enabled y/n
+  --travel_max       Max imported cases per day
+  --incubation_period Incubation period (days)
+  --daily_vaccination_rate Fraction vaccinated per day (e.g., 0.01)
+  --initial_infected Initial infected
+  --population       Population size
+  --testing_rate     low/medium/high
+  --multi_wave       y/n
+  --mask_decay_rate  Mask decay rate per day (fraction)
+  --reporting_prob_min Min reporting probability
+  --reporting_prob_max Max reporting probability
+  --plots            Comma-separated list of plots to save (e.g. sir,reported,rt)
 
 Examples:
-  python main.py interact --seasonal_amp 0.4 --seasonal_period 120
-  python main.py batch 10 --wave_ramps 7,10 --wave_durations 40,60 --sir --no-plots
+  python main.py batch 10 --days 120 --mask_score 3 --crowdedness_score 8 --quarantine_enabled y --plots sir,reported
+  python main.py --days 120 --mask_score 3 --crowdedness_score 8 --quarantine_enabled y --plots sir,reported
+  python main.py interact
   python main.py --help
 """)
 
@@ -128,24 +137,58 @@ def main():
     parser.add_argument('mode', nargs='?', default=None, choices=['interact', 'batch', None],
                         help="Mode: interact (interactive), batch (batch generation), or leave blank for random single run")
     parser.add_argument('count', nargs='?', type=int, default=5, help="Number of datasets for batch mode")
-    parser.add_argument('--sir', action='store_true', help='Use SIR model instead of SEIR')
-    parser.add_argument('--plots', dest='save_plots', action='store_true', help='Save plots (default)')
-    parser.add_argument('--no-plots', dest='save_plots', action='store_false', help='Do not save plots')
-    # Batch fixed params
-    parser.add_argument('--days', type=int, help='Number of days for each dataset in batch')
+    # User-specific/fixable params
+    parser.add_argument('--days', type=int, help='Number of days')
     parser.add_argument('--mask_score', type=int, help='Mask adherence 1-10')
-    parser.add_argument('--multi_wave_count', type=int, help='Number of multi-waves/variants')
-    parser.add_argument('--wave_days', type=str, help='Comma-separated days for each wave (e.g. 60,100)')
-    parser.add_argument('--wave_betas', type=str, help='Comma-separated beta multipliers for each wave (e.g. 2.5,2.0)')
-    parser.add_argument('--wave_seeds', type=str, help='Comma-separated seeds for each wave (e.g. 100,80)')
-    # Advanced seasonality/multi-wave
-    parser.add_argument('--seasonal_amp', type=float, help='Amplitude for seasonality (e.g. 0.3)')
-    parser.add_argument('--seasonal_period', type=int, help='Period for seasonality in days (e.g. 120)')
-    parser.add_argument('--seasonal_phase', type=float, help='Phase offset for seasonality (e.g. 0)')
-    parser.add_argument('--wave_ramps', type=str, help='Comma-separated ramp widths for each wave (e.g. 7,10)')
-    parser.add_argument('--wave_durations', type=str, help='Comma-separated durations for each wave (e.g. 40,60)')
-    parser.set_defaults(save_plots=True)
+    parser.add_argument('--crowdedness_score', type=int, help='Crowdedness 1-10')
+    parser.add_argument('--quarantine_enabled', type=str, help='Enable quarantine (y/n)')
+    parser.add_argument('--vaccination_enabled', type=str, help='Enable vaccination (y/n)')
+    parser.add_argument('--travel_enabled', type=str, help='Enable travel (y/n)')
+    parser.add_argument('--travel_max', type=int, help='Max imported cases per day')
+    parser.add_argument('--incubation_period', type=int, help='Incubation period (days)')
+    parser.add_argument('--daily_vaccination_rate', type=float, help='Fraction vaccinated per day (e.g., 0.01)')
+    parser.add_argument('--initial_infected', type=int, help='Initial infected')
+    parser.add_argument('--population', type=int, help='Population size')
+    parser.add_argument('--testing_rate', type=str, help='Testing rate (low/medium/high)')
+    parser.add_argument('--multi_wave', type=str, help='Enable multi-wave (y/n)')
+    parser.add_argument('--mask_decay_rate', type=float, help='Mask decay rate per day (fraction)')
+    parser.add_argument('--reporting_prob_min', type=float, help='Min reporting probability')
+    parser.add_argument('--reporting_prob_max', type=float, help='Max reporting probability')
+    parser.add_argument('--plots', type=str, help='Comma-separated list of plots to save (e.g. sir,reported,rt)')
+    parser.set_defaults(plots=None)
     args, unknown = parser.parse_known_args()
+
+    # --- Validation for user-specific parameters ---
+    def cli_error(msg):
+        print(f"Error: {msg}")
+        exit(1)
+    if args.mask_score is not None and not (1 <= args.mask_score <= 10):
+        cli_error("mask_score must be between 1 and 10")
+    if args.crowdedness_score is not None and not (1 <= args.crowdedness_score <= 10):
+        cli_error("crowdedness_score must be between 1 and 10")
+    if args.days is not None and args.days <= 0:
+        cli_error("days must be a positive integer")
+    if args.population is not None and args.population <= 0:
+        cli_error("population must be a positive integer")
+    for flag in ['quarantine_enabled', 'vaccination_enabled', 'travel_enabled', 'multi_wave']:
+        val = getattr(args, flag, None)
+        if val is not None and val not in ('y', 'n'):
+            cli_error(f"{flag} must be 'y' or 'n'")
+    if args.testing_rate is not None and args.testing_rate not in ('low', 'medium', 'high'):
+        cli_error("testing_rate must be 'low', 'medium', or 'high'")
+    if args.daily_vaccination_rate is not None and not (0 <= args.daily_vaccination_rate <= 1):
+        cli_error("daily_vaccination_rate must be between 0 and 1")
+    if args.incubation_period is not None and args.incubation_period <= 0:
+        cli_error("incubation_period must be a positive integer")
+    if args.travel_max is not None and args.travel_max < 0:
+        cli_error("travel_max must be >= 0")
+    if args.reporting_prob_min is not None and not (0 <= args.reporting_prob_min <= 1):
+        cli_error("reporting_prob_min must be between 0 and 1")
+    if args.reporting_prob_max is not None and not (0 <= args.reporting_prob_max <= 1):
+        cli_error("reporting_prob_max must be between 0 and 1")
+    if (args.reporting_prob_min is not None and args.reporting_prob_max is not None and
+        args.reporting_prob_max < args.reporting_prob_min):
+        cli_error("reporting_prob_max must be >= reporting_prob_min")
 
     if unknown:
         print(f"Warning: Unknown arguments: {unknown}")
@@ -154,24 +197,33 @@ def main():
     batch_fixed = {k: v for k, v in {
         'days': args.days,
         'mask_score': args.mask_score,
-        'multi_wave_count': args.multi_wave_count,
-        'wave_days': args.wave_days,
-        'wave_betas': args.wave_betas,
-        'wave_seeds': args.wave_seeds,
-        'seasonal_amp': args.seasonal_amp,
-        'seasonal_period': args.seasonal_period,
-        'seasonal_phase': args.seasonal_phase,
-        'wave_ramps': args.wave_ramps,
-        'wave_durations': args.wave_durations
+        'crowdedness_score': args.crowdedness_score,
+        'quarantine_enabled': args.quarantine_enabled,
+        'vaccination_enabled': args.vaccination_enabled,
+        'travel_enabled': args.travel_enabled,
+        'travel_max': args.travel_max,
+        'incubation_period': args.incubation_period,
+        'daily_vaccination_rate': args.daily_vaccination_rate,
+        'initial_infected': args.initial_infected,
+        'population': args.population,
+        'testing_rate': args.testing_rate,
+        'multi_wave': args.multi_wave,
+        'mask_decay_rate': args.mask_decay_rate,
+        'reporting_prob_min': args.reporting_prob_min,
+        'reporting_prob_max': args.reporting_prob_max
     }.items() if v is not None}
 
     if args.mode == 'interact':
         params = get_user_inputs()
-        run_single(params, use_sir=args.sir, save_plots=args.save_plots, cli_args=args)
+        plot_list = [p.strip() for p in args.plots.split(',')] if args.plots else []
+        run_single(params, use_sir=False, save_plots=plot_list, cli_args=args)
     elif args.mode == 'batch':
-        generate_batch(args.count, use_sir=args.sir, save_plots=args.save_plots, batch_fixed=batch_fixed)
+        plot_list = [p.strip() for p in args.plots.split(',')] if args.plots else []
+        generate_batch(args.count, use_sir=False, save_plots=plot_list, batch_fixed=batch_fixed)
     elif args.mode is None:
-        params = generate_random_inputs()
-        run_single(params, use_sir=args.sir, save_plots=args.save_plots, cli_args=args)
+        # Single run with fixed params if provided, else random
+        params = generate_random_inputs(batch_fixed=batch_fixed)
+        plot_list = [p.strip() for p in args.plots.split(',')] if args.plots else []
+        run_single(params, use_sir=False, save_plots=plot_list, cli_args=args)
     else:
         print("Unknown mode! Use: 'interact', 'batch <count>', or --help.") 
