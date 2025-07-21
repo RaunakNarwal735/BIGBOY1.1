@@ -13,8 +13,8 @@ BASE_SAVE_DIR = r"C:\Users\rishu narwal\Desktop\SVM_FDE\datasets"  # Default out
 # =============================
 # Behavioral Beta Scaling
 # =============================
-MASK_MAX_REDUCTION = 0.6       # mask_score=10 -> -60% beta
-CROWD_MAX_INCREASE = 0.7       # crowd_score=10 -> +70% beta
+MASK_MAX_REDUCTION = 0.15       # mask_score=10 -> -15% beta
+CROWD_MAX_INCREASE = 1.3       # crowd_score=10 -> +130% beta
 
 # =============================
 # Seasonality Defaults
@@ -74,3 +74,12 @@ DROP_MAX_CASES = 17
 default_vaccination_rate = 0.0  # default: 0% per day
 INCUBATION_PERIOD_DEFAULT = 4   # days
 MASK_DECAY_RATE_DEFAULT = 0.01  # 1% per day 
+
+# =============================
+# User Parameter Scaling Factors
+# =============================
+# These control how strongly user input affects the simulation
+MASK_SCORE_SCALING = 0.015         # mask_score * this (default: 0.06, so 10 = 0.6)
+CROWD_SCORE_SCALING = 0.15        # (crowd_score-1) * this (default: 0.07, so 9 = 0.63)
+QUARANTINE_EFFECT_SCALING = 0.5   # Fraction of infectious pool removed if quarantine enabled
+VACCINATION_EFFECT_SCALING = 0.9  # Fraction of vaccinated who become immune (default: 0.9) 

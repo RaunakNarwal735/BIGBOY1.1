@@ -79,6 +79,13 @@ def get_user_inputs():
     incubation_period = input(f"Incubation period (days) [{INCUBATION_PERIOD_DEFAULT}]: ").strip()
     incubation_period = int(incubation_period) if incubation_period else INCUBATION_PERIOD_DEFAULT
 
+    # Number of layers
+    layers_in = input("Number of network layers (e.g., 2 for household/community) [2]: ").strip()
+    layers = int(layers_in) if layers_in else 2
+    # Number of age groups
+    age_groups_in = input("Number of age groups (e.g., 3 for children, adults, elderly) [3]: ").strip()
+    age_groups = int(age_groups_in) if age_groups_in else 3
+
     # Unified variant/multi-wave
     num_waves = input("How many variant/multi-wave events? [1]: ").strip()
     num_waves = int(num_waves) if num_waves else 1
@@ -141,7 +148,9 @@ def get_user_inputs():
         "mask_decay_rate": mask_decay_rate,
         "travel_enabled": travel_enabled,
         "travel_max": travel_max,
-        "mode": "interactive"
+        "mode": "interactive",
+        "layers": layers,
+        "age_groups": age_groups
     }
     return params
 
@@ -248,6 +257,8 @@ def generate_random_inputs(batch_fixed=None):
         "mask_decay_rate": mask_decay_rate,
         "travel_enabled": travel_enabled,
         "travel_max": travel_max,
-        "mode": "random"
+        "mode": "random",
+        "layers": batch_fixed.get('layers') if batch_fixed.get('layers') is not None else 2,
+        "age_groups": batch_fixed.get('age_groups') if batch_fixed.get('age_groups') is not None else 3
     }
     return params 
