@@ -108,7 +108,10 @@ def simulate_epidemic(params, use_sir=False):
         crowd_effect = 1 + (CROWD_SCORE_SCALING * (crowdedness_score - 1))
         beta_t *= mask_effect * crowd_effect
         if seasonality:
-            beta_t *= variable_seasonality(t, seasonal_amp, seasonal_period, phase=seasonal_phase)
+            seasonal_effect = variable_seasonality(t, seasonal_amp, seasonal_period, phase=seasonal_phase)
+            beta_t *= seasonal_effect
+        else:
+            seasonal_effect = 1.0
         beta_multiplier = 1.0
         for wave in waves:
             onset = wave['day']
@@ -119,6 +122,9 @@ def simulate_epidemic(params, use_sir=False):
             wave_effect = ramp_up * ramp_down
             beta_multiplier += (wave['beta'] - 1.0) * wave_effect
         beta_t *= beta_multiplier
+        beta_effective = beta_t.mean()  # Average beta across all layers and ages
+        # Calculate Rt (time-dependent reproduction number)
+        Rt = beta_effective * (S.sum() / N)
         # --- Abrupt interventions (previous logic, threshold now 10%) ---
         for l in range(n_layers):
             for a in range(n_ages):
@@ -205,10 +211,11 @@ def simulate_epidemic(params, use_sir=False):
         # Reporting lag: shift reported cases by lag days (simple: no lag memory)
         reported_cases = rng.binomial(new_I_tot, t_report_p) if new_I_tot > 0 else 0
         rows.append([
-            t, S_tot, E_tot, I_tot, R_tot, new_E_tot, new_I_tot, new_R_tot, reported_cases
+            t, S_tot, E_tot, I_tot, R_tot, new_E_tot, new_I_tot, new_R_tot, reported_cases, beta_effective, seasonal_effect, Rt
         ])
     df = pd.DataFrame(rows, columns=[
         "Day", "Susceptible", "Exposed", "Infected", "Recovered",
-        "New_Exposed", "New_Infections", "New_Recoveries", "Reported_Cases"
+        "New_Exposed", "New_Infections", "New_Recoveries", "Reported_Cases",
+        "Beta_Effective", "Seasonality", "Rt"
     ])
-    return df 
+    return df

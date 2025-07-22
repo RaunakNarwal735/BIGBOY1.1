@@ -5,36 +5,19 @@ Contains all global constants and default parameters.
 
 import os
 
-# =============================
-# Output Directory
-# =============================
-BASE_SAVE_DIR = r"C:\Users\rishu narwal\Desktop\SVM_FDE\datasets"  # Default output directory
 
-# =============================
-# Behavioral Beta Scaling
-# =============================
+BASE_SAVE_DIR = r"C:\Users\rishu narwal\Desktop\SVM_FDE\datasets"  # Default output directory
+#
 MASK_MAX_REDUCTION = 0.15       # mask_score=10 -> -15% beta
 CROWD_MAX_INCREASE = 1.3       # crowd_score=10 -> +130% beta
-
-# =============================
-# Seasonality Defaults
-# =============================
+#
 SEASONAL_AMP = 0.25            # +/- 25%
-SEASONAL_PERIOD = 60           # 60-day cycle
-
-# =============================
-# Quarantine
-# =============================
-QUARANTINE_FRACTION = 0.5      # 50% of infected effectively isolated if enabled
-
-# =============================
-# Recovery Rate (gamma)
-# =============================
-GAMMA = 0.08                   # slower recovery than before -> longer epidemic
-
-# =============================
-# Central Peak Envelope (Gaussian)
-# =============================
+SEASONAL_PERIOD = 60   
+#        # 60-day cycle
+QUARANTINE_FRACTION = 0.5   
+#   # 50% of infected effectively isolated if enabled
+GAMMA = 0.08            
+#       # slower recovery than before -> longer epidemic
 CENTER_AMP = 0.5               # up to +50% beta at mid-epidemic
 CENTER_SIGMA_FRAC = 0.2        # width = fraction of total days (std dev)
 
