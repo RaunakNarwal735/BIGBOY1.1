@@ -10,9 +10,8 @@ from config import (
     INCUBATION_PERIOD_DEFAULT, MASK_DECAY_RATE_DEFAULT, default_vaccination_rate
 )
 
-# =============================
 # Helper Functions
-# =============================
+
 def yn_to_bool(v: str) -> bool:
     """
     Convert a yes/no string to boolean.
