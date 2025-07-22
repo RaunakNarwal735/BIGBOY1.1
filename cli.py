@@ -1,7 +1,4 @@
 """
-CLI module for Epidemic Dataset Generator (updated w/ guaranteed dataset saving)
-
-Key behavior changes:
 - **Dataset ALWAYS saved** (CSV + metadata) regardless of `--plots` selection.
 - `--plots all` now: writes dataset via `save_outputs(..., save_plots=[])` (no base plots),
   then generates the full advanced suite via `advanced_plotting.save_all_advanced_plots()`.
@@ -19,9 +16,6 @@ Usage examples:
     python BIGBOY1.2.py --plots sir
     python BIGBOY1.2.py batch 10 --plots sir
     python BIGBOY1.2.py interact --plots all
-
-NOTE: Requires `advanced_plotting.py` in the same directory (or on PYTHONPATH)
-for the `--plots all` option. If not found, falls back to classic SIR plots.
 """
 
 from __future__ import annotations
@@ -49,10 +43,8 @@ def _cli_error(msg: str) -> None:
     print(f"Error: {msg}")
     raise SystemExit(1)
 
-
-# ------------------------------------------------------------------
 # Plot selection parsing
-# ------------------------------------------------------------------
+
 
 PlotSelection = Union[str, List[str]]  # 'all' OR list like ['sir','reported']
 
@@ -79,11 +71,7 @@ def parse_plot_arg(raw: str | None) -> PlotSelection:
     if 'sir' in tokens and 'reported' not in tokens:
         tokens.append('reported')
     return tokens
-
-
-# ------------------------------------------------------------------
 # Seasonality / wave arg utilities
-# ------------------------------------------------------------------
 
 def _parse_csv_floats(s: str | None) -> List[float] | None:
     if s is None:
@@ -106,10 +94,7 @@ def _parse_csv_ints(s: str | None) -> List[int] | None:
         return None
     return [int(round(v)) for v in vals]
 
-
-# ------------------------------------------------------------------
 # Core run functions
-# ------------------------------------------------------------------
 
 def _apply_cli_overrides(params: Dict[str, Any], cli_args: argparse.Namespace) -> None:
     """Inject optional advanced params into params dict (in place)."""
@@ -187,10 +172,7 @@ def generate_batch(count: int = 5, use_sir: bool = False, plot_sel: PlotSelectio
         print(f"  Dataset {i}/{count} -> {os.path.join(run_dir, 'dataset.csv')}")
     print(f"\nAll datasets saved in: {base_batch_dir}")
 
-
-# ------------------------------------------------------------------
 # Argument parser
-# ------------------------------------------------------------------
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -238,11 +220,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help="Comma-separated plots to save. Use 'sir' for classic 2 plots, 'all' for full advanced suite.")
 
     return parser
-
-
-# ------------------------------------------------------------------
 # Validation helpers
-# ------------------------------------------------------------------
 
 def _validate_args(args: argparse.Namespace) -> None:
     if args.mask_score is not None and not (1 <= args.mask_score <= 10):
