@@ -18,16 +18,6 @@ won't break) and adds all the new, more visual plots you requested:
 All figures are saved at dpi=300. Seaborn is optional; the module falls back to a
 matplotlib style if Seaborn isn’t installed, so you will not crash.
 
-Usage example:
-
-    import pandas as pd
-    import advanced_plotting as ap
-
-    df = pd.read_csv("run.csv")
-    ap.plot_compartment_heatmap(df, "out/heatmap.png")
-    ap.plot_phase_diagram(df, "out/phase_beta.png", color_by="Beta_Effective")
-    ap.save_all_advanced_plots(df, "out/all_plots")
-
 """
 
 from __future__ import annotations
@@ -40,10 +30,8 @@ from matplotlib.colors import Normalize
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers 3D projection)
 
-# ------------------------------------------------------------------
-# Optional Seaborn styling (graceful fallback)
-# ------------------------------------------------------------------
-try:  # try/except so missing seaborn never breaks plotting
+
+try:  
     import seaborn as sns  # type: ignore
     _HAVE_SNS = True
     sns.set_style("darkgrid")
@@ -52,15 +40,11 @@ except Exception:  # ImportError or runtime error
     _HAVE_SNS = False
     plt.style.use("seaborn-v0_8-darkgrid")  # built-in mpl style
 
-# If project defines BASE_SAVE_DIR we don’t actually need it here, but we'll try.
 try:  # soft import (unused but harmless)
     from config import BASE_SAVE_DIR  # type: ignore  # noqa: F401
 except Exception:  # keep module importable if config missing
     BASE_SAVE_DIR = "."
 
-# ------------------------------------------------------------------
-# Utilities
-# ------------------------------------------------------------------
 DEF_COMPARTMENTS = [ "Exposed", "Infected","Susceptible", "Recovered"]
 
 
@@ -178,7 +162,7 @@ def plot_compartment_heatmap(
         plt.close(fig)
         return
 
-    # --- GitHub style ----------------------------------------------------
+    
     # Row-wise max for scaling; avoid divide-by-zero
     row_max = values.max(axis=1, keepdims=True)
     row_max[row_max == 0] = 1.0
@@ -439,10 +423,8 @@ def plot_beta_vs_seasonality(
     fig.savefig(path, dpi=300)
     plt.close(fig)
 
-
-# ------------------------------------------------------------------
 # 8. Circular / Radial Seasonality Plot
-# ------------------------------------------------------------------
+
 
 def plot_radial_seasonality(df: pd.DataFrame, path: str, period: int | None = None) -> None:
     """Polar plot showing seasonality (and scaled infections) over a cycle.
