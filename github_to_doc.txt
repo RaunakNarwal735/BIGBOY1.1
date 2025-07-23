@@ -1,0 +1,2769 @@
+Repository: raunaknarwal735/bigboy1.1
+Files analyzed: 11
+
+Estimated tokens: 27.3k
+
+Directory structure:
+└── raunaknarwal735-bigboy1.1/
+    ├── BIGBOY1.2.py
+    ├── cli.py
+    ├── config.py
+    ├── input_handlers.py
+    ├── output.py
+    ├── plotting.py
+    ├── requirements.txt
+    ├── simulation.py
+    ├── submit.bat
+    └── Conc/
+        ├── BIGBOY1.1.py
+        └── BIGBOY1.py
+
+
+================================================
+FILE: BIGBOY1.2.py
+================================================
+
+
+from cli import main
+
+if __name__ == "__main__":
+    main() 
+
+
+================================================
+FILE: cli.py
+================================================
+"""
+- **Dataset ALWAYS saved** (CSV + metadata) regardless of `--plots` selection.
+- `--plots all` now: writes dataset via `save_outputs(..., save_plots=[])` (no base plots),
+  then generates the full advanced suite via `advanced_plotting.save_all_advanced_plots()`.
+- `--plots sir` expands to the classic two plots (`sir`, `reported`).
+- Any comma list (e.g., `sir,reported,heatmap`) passed through to `save_outputs()`.
+- Seasonality/wave overrides added & safely applied (no AttributeError).
+
+Modes:
+    interact  -> prompt user for params
+    batch N   -> N random runs (or partially fixed via args)
+    (blank)   -> single random run ("random mode")
+
+Usage examples:
+    python BIGBOY1.2.py --plots all
+    python BIGBOY1.2.py --plots sir
+    python BIGBOY1.2.py batch 10 --plots sir
+    python BIGBOY1.2.py interact --plots all
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+from datetime import datetime
+from typing import Any, Dict, List, Union
+
+from config import BASE_SAVE_DIR
+from input_handlers import get_user_inputs, generate_random_inputs
+from simulation import simulate_epidemic
+from output import save_outputs
+
+# ------------------------------------------------------------------
+# Helpers
+# ------------------------------------------------------------------
+
+def ts() -> str:
+    """Timestamp string for unique output directories."""
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def _cli_error(msg: str) -> None:
+    print(f"Error: {msg}")
+    raise SystemExit(1)
+
+# Plot selection parsing
+
+
+PlotSelection = Union[str, List[str]]  # 'all' OR list like ['sir','reported']
+
+
+def parse_plot_arg(raw: str | None) -> PlotSelection:
+    """Normalize the --plots argument.
+
+    Returns:
+        'all'              -> user requested all advanced plots.
+        ['sir','reported'] -> user requested sir (classic minimal set).
+        [...]              -> cleaned list of user tokens.
+        []                 -> no plots.
+    """
+    if not raw:
+        return []
+    tokens = [t.strip().lower() for t in raw.split(',') if t.strip()]
+    if not tokens:
+        return []
+    if 'all' in tokens:
+        return 'all'
+    if tokens == ['sir']:
+        return ['sir', 'reported']
+    # Expand bare 'sir' among others? keep user intent: add reported if missing.
+    if 'sir' in tokens and 'reported' not in tokens:
+        tokens.append('reported')
+    return tokens
+# Seasonality / wave arg utilities
+
+def _parse_csv_floats(s: str | None) -> List[float] | None:
+    if s is None:
+        return None
+    out: List[float] = []
+    for tok in s.split(','):
+        tok = tok.strip()
+        if not tok:
+            continue
+        try:
+            out.append(float(tok))
+        except ValueError:
+            print(f"Warning: could not parse float in list: {tok}")
+    return out if out else None
+
+
+def _parse_csv_ints(s: str | None) -> List[int] | None:
+    vals = _parse_csv_floats(s)
+    if vals is None:
+        return None
+    return [int(round(v)) for v in vals]
+
+# Core run functions
+
+def _apply_cli_overrides(params: Dict[str, Any], cli_args: argparse.Namespace) -> None:
+    """Inject optional advanced params into params dict (in place)."""
+    # Seasonality overrides
+    if getattr(cli_args, 'seasonal_amp', None) is not None:
+        params['seasonal_amp'] = cli_args.seasonal_amp
+    if getattr(cli_args, 'seasonal_period', None) is not None:
+        params['seasonal_period'] = cli_args.seasonal_period
+    if getattr(cli_args, 'seasonal_phase', None) is not None:
+        params['seasonal_phase'] = cli_args.seasonal_phase
+
+    # Multi-wave shape overrides (if model supports)
+    ramps = _parse_csv_floats(getattr(cli_args, 'wave_ramps', None))
+    durs = _parse_csv_ints(getattr(cli_args, 'wave_durations', None))
+    if 'waves' in params and isinstance(params['waves'], list):
+        if ramps:
+            for j, wave in enumerate(params['waves']):
+                if j < len(ramps):
+                    wave['ramp'] = ramps[j]
+        if durs:
+            for j, wave in enumerate(params['waves']):
+                if j < len(durs):
+                    wave['duration'] = durs[j]
+
+
+def _do_save_plots(plot_sel: PlotSelection, df, params, out_dir: str) -> None:
+    """ALWAYS write dataset; then generate plots per selection."""
+    # 1. Always save dataset (CSV, metadata) FIRST. Force no basic plots here.
+    #    This guarantees the user always gets a dataset even in --plots all mode.
+    save_outputs(df, params, out_dir, save_plots=[])  # dataset only
+
+    # 2. Now handle plot selection
+    if plot_sel == 'all':
+        try:
+            import numpy as np  # local
+            from plotting import save_all_advanced_plots
+        except Exception as e:  # advanced plotting missing
+            print(f"[WARN] advanced_plotting not available ({e}); falling back to classic SIR plots.")
+            # generate classic 2 plots
+            save_outputs(df, params, out_dir, save_plots=['sir', 'reported'])
+        else:
+            save_all_advanced_plots(df, out_dir)
+        return
+
+    # Non-all: user wanted specific basic plots (sir/report/...). Use save_outputs.
+    if isinstance(plot_sel, list) and plot_sel:
+        save_outputs(df, params, out_dir, save_plots=plot_sel)
+    # If user passed empty list, nothing extra (dataset already saved).
+
+
+def run_single(params: Dict[str, Any], use_sir: bool, plot_sel: PlotSelection, cli_args: argparse.Namespace | None = None) -> None:
+    """Run one simulation and save outputs/plots."""
+    if cli_args is not None:
+        _apply_cli_overrides(params, cli_args)
+    df = simulate_epidemic(params, use_sir=use_sir)
+    out_dir = os.path.join(BASE_SAVE_DIR, f"run_{ts()}")
+    _do_save_plots(plot_sel, df, params, out_dir)
+    print(f"Run saved in: {out_dir}")
+
+
+def generate_batch(count: int = 5, use_sir: bool = False, plot_sel: PlotSelection = 'all', batch_fixed: Dict[str, Any] | None = None, cli_args: argparse.Namespace | None = None) -> None:
+    """Generate many random datasets and save each set of plots."""
+    if count < 1:
+        _cli_error("Batch count must be at least 1.")
+    batch_id = ts()
+    base_batch_dir = os.path.join(BASE_SAVE_DIR, f"batch_{batch_id}")
+    print(f"\n=== BATCH GENERATION: {count} datasets ===")
+    for i in range(1, count + 1):
+        params = generate_random_inputs(batch_fixed=batch_fixed)
+        if cli_args is not None:
+            _apply_cli_overrides(params, cli_args)
+        df = simulate_epidemic(params, use_sir=use_sir)
+        run_dir = os.path.join(base_batch_dir, f"run_{i:03d}")
+        _do_save_plots(plot_sel, df, params, run_dir)
+        print(f"  Dataset {i}/{count} -> {os.path.join(run_dir, 'dataset.csv')}")
+    print(f"\nAll datasets saved in: {base_batch_dir}")
+
+# Argument parser
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Epidemic Dataset Generator CLI",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument('mode', nargs='?', default=None, choices=['interact', 'batch', None],
+                        help="Mode: interact (prompt), batch (generate many), or blank for single run")
+    parser.add_argument('count', nargs='?', type=int, default=5, help="Number of datasets when in batch mode")
+
+    # Core user parameters (all optional; used to override random params)
+    parser.add_argument('--days', type=int, help='Number of days')
+    parser.add_argument('--mask_score', type=int, help='Mask adherence 1-10')
+    parser.add_argument('--crowdedness_score', type=int, help='Crowdedness 1-10')
+    parser.add_argument('--quarantine_enabled', type=str, help="Enable quarantine (y/n)")
+    parser.add_argument('--vaccination_enabled', type=str, help="Enable vaccination (y/n)")
+    parser.add_argument('--travel_enabled', type=str, help="Enable travel (y/n)")
+    parser.add_argument('--travel_max', type=int, help='Max imported cases per day')
+    parser.add_argument('--incubation_period', type=int, help='Incubation period (days)')
+    parser.add_argument('--daily_vaccination_rate', type=float, help='Fraction vaccinated per day (0-1)')
+    parser.add_argument('--initial_infected', type=int, help='Initial infected count')
+    parser.add_argument('--population', type=int, help='Population size')
+    parser.add_argument('--testing_rate', type=str, help='Testing rate (low/medium/high)')
+    parser.add_argument('--multi_wave', type=str, help='Enable multi-wave (y/n)')
+    parser.add_argument('--mask_decay_rate', type=float, help='Mask decay rate per day (fraction)')
+    parser.add_argument('--reporting_prob_min', type=float, help='Min reporting probability (0-1)')
+    parser.add_argument('--reporting_prob_max', type=float, help='Max reporting probability (0-1)')
+
+    # Seasonality / transmission overrides (safe optional)
+    parser.add_argument('--seasonal_amp', type=float, default=None,
+                        help='Amplitude for seasonal forcing of transmission')
+    parser.add_argument('--seasonal_period', type=float, default=None,
+                        help='Season length in days (e.g., 365)')
+    parser.add_argument('--seasonal_phase', type=float, default=None,
+                        help='Phase shift in days')
+
+    # Multi-wave shape overrides
+    parser.add_argument('--wave_ramps', type=str, default=None,
+                        help='Comma-separated multipliers per wave (e.g., 1.0,1.5,0.8)')
+    parser.add_argument('--wave_durations', type=str, default=None,
+                        help='Comma-separated durations per wave (days)')
+
+    # Plot selection
+    parser.add_argument('--plots', type=str, default=None,
+                        help="Comma-separated plots to save. Use 'sir' for classic 2 plots, 'all' for full advanced suite.")
+
+    return parser
+# Validation helpers
+
+def _validate_args(args: argparse.Namespace) -> None:
+    if args.mask_score is not None and not (1 <= args.mask_score <= 10):
+        _cli_error("mask_score must be between 1 and 10")
+    if args.crowdedness_score is not None and not (1 <= args.crowdedness_score <= 10):
+        _cli_error("crowdedness_score must be between 1 and 10")
+    if args.days is not None and args.days <= 0:
+        _cli_error("days must be positive")
+    if args.population is not None and args.population <= 0:
+        _cli_error("population must be positive")
+
+    for flag in ['quarantine_enabled', 'vaccination_enabled', 'travel_enabled', 'multi_wave']:
+        val = getattr(args, flag, None)
+        if val is not None and val not in ('y', 'n'):
+            _cli_error(f"{flag} must be 'y' or 'n'")
+
+    if args.testing_rate is not None and args.testing_rate not in ('low', 'medium', 'high'):
+        _cli_error("testing_rate must be 'low', 'medium', or 'high'")
+
+    if args.daily_vaccination_rate is not None and not (0 <= args.daily_vaccination_rate <= 1):
+        _cli_error("daily_vaccination_rate must be 0-1")
+
+    if args.incubation_period is not None and args.incubation_period <= 0:
+        _cli_error("incubation_period must be positive")
+
+    if args.travel_max is not None and args.travel_max < 0:
+        _cli_error("travel_max must be >= 0")
+
+    if args.reporting_prob_min is not None and not (0 <= args.reporting_prob_min <= 1):
+        _cli_error("reporting_prob_min must be 0-1")
+    if args.reporting_prob_max is not None and not (0 <= args.reporting_prob_max <= 1):
+        _cli_error("reporting_prob_max must be 0-1")
+    if (args.reporting_prob_min is not None and args.reporting_prob_max is not None and
+            args.reporting_prob_max < args.reporting_prob_min):
+        _cli_error("reporting_prob_max must be >= reporting_prob_min")
+
+
+# ------------------------------------------------------------------
+# Main entrypoint
+# ------------------------------------------------------------------
+
+def main() -> None:
+    parser = build_arg_parser()
+    args, unknown = parser.parse_known_args()
+
+    if unknown:
+        print(f"Warning: Unknown arguments ignored: {unknown}")
+
+    _validate_args(args)
+
+    # Build dict of user overrides (only non-None)
+    batch_fixed = {k: v for k, v in {
+        'days': args.days,
+        'mask_score': args.mask_score,
+        'crowdedness_score': args.crowdedness_score,
+        'quarantine_enabled': args.quarantine_enabled,
+        'vaccination_enabled': args.vaccination_enabled,
+        'travel_enabled': args.travel_enabled,
+        'travel_max': args.travel_max,
+        'incubation_period': args.incubation_period,
+        'daily_vaccination_rate': args.daily_vaccination_rate,
+        'initial_infected': args.initial_infected,
+        'population': args.population,
+        'testing_rate': args.testing_rate,
+        'multi_wave': args.multi_wave,
+        'mask_decay_rate': args.mask_decay_rate,
+        'reporting_prob_min': args.reporting_prob_min,
+        'reporting_prob_max': args.reporting_prob_max,
+    }.items() if v is not None}
+
+    # Parse plots selection
+    plot_sel = parse_plot_arg(args.plots)
+
+    if args.mode == 'interact':
+        params = get_user_inputs()
+        run_single(params, use_sir=False, plot_sel=plot_sel, cli_args=args)
+        return
+
+    if args.mode == 'batch':
+        generate_batch(args.count, use_sir=False, plot_sel=plot_sel, batch_fixed=batch_fixed, cli_args=args)
+        return
+
+    # Mode None -> random single (with overrides if provided)
+    params = generate_random_inputs(batch_fixed=batch_fixed)
+    run_single(params, use_sir=False, plot_sel=plot_sel, cli_args=args)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
+
+
+
+================================================
+FILE: config.py
+================================================
+"""
+Configuration module for epidemic dataset generator.
+Contains all global constants and default parameters.
+"""
+
+import os
+
+
+BASE_SAVE_DIR = r"C:\Users\rishu narwal\Desktop\SVM_FDE\datasets"  # Default output directory
+#
+MASK_MAX_REDUCTION = 0.15       # mask_score=10 -> -15% beta
+CROWD_MAX_INCREASE = 1.3       # crowd_score=10 -> +130% beta
+#
+SEASONAL_AMP = 0.25            # +/- 25%
+SEASONAL_PERIOD = 60   
+#        # 60-day cycle
+QUARANTINE_FRACTION = 0.5   
+#   # 50% of infected effectively isolated if enabled
+GAMMA = 0.08            
+#       # slower recovery than before -> longer epidemic
+CENTER_AMP = 0.5               # up to +50% beta at mid-epidemic
+CENTER_SIGMA_FRAC = 0.2        # width = fraction of total days (std dev)
+
+MULTIWAVE_BETA_MULT = 1.5      # 50% beta increase during second wave
+MULTIWAVE_DURATION = 20        # days
+VARIANT_BETA_MULTIPLIER_DEFAULT = 1.5
+VARIANT_DAY_DEFAULT = 60
+VARIANT_WAVE_DURATION = 40     # days for a more dramatic, realistic wave
+
+INT_DURATION = 14              # days
+INT_MULTIPLIER = 0.4           # 60% beta reduction
+
+REPORT_SIGMA_ABS = 0.05        # absolute +/- noise to reporting prob
+REPORT_CLIP_MIN = 0.0
+REPORT_CLIP_MAX = 0.99
+
+DROP_MIN_INTERVAL = 1          # min days between drops
+DROP_MAX_INTERVAL = 3          # max days between drops
+DROP_MIN_CASES = 1
+DROP_MAX_CASES = 17
+
+default_vaccination_rate = 0.0  # default: 0% per day
+INCUBATION_PERIOD_DEFAULT = 4   # days
+MASK_DECAY_RATE_DEFAULT = 0.01  # 1% per day 
+
+# These control how strongly user input affects the simulation
+MASK_SCORE_SCALING = 0.015         # mask_score * this (default: 0.06, so 10 = 0.6)
+CROWD_SCORE_SCALING = 0.15        # (crowd_score-1) * this (default: 0.07, so 9 = 0.63)
+QUARANTINE_EFFECT_SCALING = 0.5   # Fraction of infectious pool removed if quarantine enabled
+VACCINATION_EFFECT_SCALING = 0.9  # Fraction of vaccinated who become immune (default: 0.9) 
+
+
+
+================================================
+FILE: input_handlers.py
+================================================
+"""
+Input Handlers for Epidemic Dataset Generator
+
+Contains functions for interactive user input and random parameter generation.
+"""
+
+import random
+from datetime import datetime
+from config import (
+    INCUBATION_PERIOD_DEFAULT, MASK_DECAY_RATE_DEFAULT, default_vaccination_rate
+)
+
+# Helper Functions
+
+def yn_to_bool(v: str) -> bool:
+    """
+    Convert a yes/no string to boolean.
+    Accepts: 'y', 'yes', 'true', '1' as True; else False.
+    """
+    return str(v).strip().lower() in ("y", "yes", "true", "1")
+
+
+def get_user_inputs():
+    """
+    Prompt the user for all simulation parameters interactively.
+    Returns a dictionary of parameters.
+    """
+    print("\n=== INTERACTIVE MODE ===")
+
+    # population
+    pop = input("Population [73500]: ").strip()
+    population = int(pop) if pop else 73500
+    if population > 1_000_000:
+        print("Population capped at 1,000,000.")
+        population = 1_000_000
+    if population < 1000:
+        print("Population too low; forcing 1000.")
+        population = 1000
+
+    # days
+    d = input("Number of days [180]: ").strip()
+    days = int(d) if d else 180
+    if days < 30:
+        print("Days too low; forcing 30.")
+        days = 30
+
+    # initial infected
+    ii = input("Initial infected [50]: ").strip()
+    initial_infected = int(ii) if ii else 50
+    max_init = max(1, min(population // 20, 5000))  # <=5% of pop, cap 5000
+    if initial_infected > max_init:
+        print(f"Initial infected capped at {max_init}.")
+        initial_infected = max_init
+    if initial_infected < 1:
+        initial_infected = 1
+
+    # mask and crowd
+    ms = input("Mask adherence 1-10 [4]: ").strip()
+    mask_score = int(ms) if ms else 4
+    mask_score = min(max(mask_score, 1), 10)
+
+    cs = input("Crowdedness 1-10 [6]: ").strip()
+    crowdedness_score = int(cs) if cs else 6
+    crowdedness_score = min(max(crowdedness_score, 1), 10)
+
+    # feature flags
+    quarantine_enabled = input("Enable quarantine (y/n) [y]: ").strip() or "y"
+    seasonality_enabled = input("Enable seasonality (y/n) [y]: ").strip() or "y"
+    interventions_enabled = input("Enable interventions (y/n) [y]: ").strip() or "y"
+    multi_wave = input("Enable multi-wave (y/n) [n]: ").strip() or "n"
+
+    # vaccination
+    vaccination_enabled = input("Enable vaccination (y/n) [n]: ").strip() or "n"
+    daily_vaccination_rate = input("Daily vaccination rate (fraction, e.g. 0.01 for 1%) [0.0]: ").strip()
+    daily_vaccination_rate = float(daily_vaccination_rate) if daily_vaccination_rate else 0.0
+
+    # incubation period
+    incubation_period = input(f"Incubation period (days) [{INCUBATION_PERIOD_DEFAULT}]: ").strip()
+    incubation_period = int(incubation_period) if incubation_period else INCUBATION_PERIOD_DEFAULT
+
+    # Number of layers
+    layers_in = input("Number of network layers (e.g., 2 for household/community) [2]: ").strip()
+    layers = int(layers_in) if layers_in else 2
+    # Number of age groups
+    age_groups_in = input("Number of age groups (e.g., 3 for children, adults, elderly) [3]: ").strip()
+    age_groups = int(age_groups_in) if age_groups_in else 3
+
+    # Unified variant/multi-wave
+    num_waves = input("How many variant/multi-wave events? [1]: ").strip()
+    num_waves = int(num_waves) if num_waves else 1
+    waves = []
+    for i in range(num_waves):
+        print(f"--- Wave {i+1} ---")
+        wave_day = input(f"  Day of wave [e.g., {60 + i*30}]: ").strip()
+        wave_day = int(wave_day) if wave_day else (60 + i*30)
+        wave_beta = input("  Beta multiplier [e.g., 2.5 for dramatic wave]: ").strip()
+        wave_beta = float(wave_beta) if wave_beta else 2.5  # More dramatic default
+        wave_seed = input("  Seed new exposed (number) [e.g., 100 for dramatic wave]: ").strip()
+        wave_seed = int(wave_seed) if wave_seed else 100  # More dramatic default
+        waves.append({"day": wave_day, "beta": wave_beta, "seed": wave_seed})
+
+    # testing intensity
+    testing_rate = input("Testing rate (low/medium/high) [medium]: ").strip() or "medium"
+
+    # mask decay
+    mask_decay_rate = input(f"Mask decay rate per day (fraction, e.g. 0.01 for 1%) [{MASK_DECAY_RATE_DEFAULT}]: ").strip()
+    mask_decay_rate = float(mask_decay_rate) if mask_decay_rate else MASK_DECAY_RATE_DEFAULT
+
+    # travel between cities
+    travel_enabled = input("Enable travel between cities (y/n) [n]: ").strip() or "n"
+    travel_max = 0
+    if yn_to_bool(travel_enabled):
+        travel_max_in = input("Travel (number of new exposed imported per day, 1–10) [3]: ").strip()
+        travel_max = int(travel_max_in) if travel_max_in else 3
+
+    # reporting range
+    rpmin = input("Reporting probability min [0.6]: ").strip()
+    reporting_prob_min = float(rpmin) if rpmin else 0.6
+    rpmax = input("Reporting probability max [0.85]: ").strip()
+    reporting_prob_max = float(rpmax) if rpmax else 0.85
+    if reporting_prob_max <= reporting_prob_min:
+        print("Max must be > min; adjusting.")
+        reporting_prob_max = min(0.95, reporting_prob_min + 0.1)
+
+    # seed
+    seed_in = input("Random seed [auto]: ").strip()
+    random_seed = None if not seed_in or seed_in.lower() == "auto" else int(seed_in)
+
+    params = {
+        "population": population,
+        "days": days,
+        "initial_infected": initial_infected,
+        "mask_score": mask_score,
+        "crowdedness_score": crowdedness_score,
+        "quarantine_enabled": quarantine_enabled,
+        "seasonality_enabled": seasonality_enabled,
+        "interventions_enabled": interventions_enabled,
+        "reporting_prob_min": reporting_prob_min,
+        "reporting_prob_max": reporting_prob_max,
+        "multi_wave": multi_wave,
+        "random_seed": random_seed,
+        "vaccination_enabled": vaccination_enabled,
+        "daily_vaccination_rate": daily_vaccination_rate,
+        "incubation_period": incubation_period,
+        "waves": waves,
+        "testing_rate": testing_rate,
+        "mask_decay_rate": mask_decay_rate,
+        "travel_enabled": travel_enabled,
+        "travel_max": travel_max,
+        "mode": "interactive",
+        "layers": layers,
+        "age_groups": age_groups
+    }
+    return params
+
+
+def generate_random_inputs(batch_fixed=None):
+    """
+    Generate a random but realistic parameter config.
+    Returns a dictionary of parameters.
+    """
+    population = random.randint(10_000, 1_000_000)
+    if batch_fixed is None:
+        days = random.randint(90, 365)
+        max_init = max(1, min(population // 20, 5000))
+        initial_infected = random.randint(10, max_init)
+
+        mask_score = random.randint(1, 10)
+        crowdedness_score = random.randint(1, 10)
+
+        quarantine_enabled = random.choice(["y", "n"])
+        seasonality_enabled = random.choice(["y", "n"])
+        interventions_enabled = random.choice(["y", "n"])
+        multi_wave = random.choice(["y", "n"])
+
+        vaccination_enabled = random.choice(["y", "n"])
+        daily_vaccination_rate = round(random.uniform(0.0, 0.02), 3)  # up to 2% per day
+        incubation_period = random.randint(2, 7)
+        testing_rate = random.choice(["low", "medium", "high"])
+        mask_decay_rate = round(random.uniform(0.005, 0.02), 4)
+
+        travel_enabled = random.choice(["y", "n"])
+        travel_max = random.randint(1, 10) if yn_to_bool(travel_enabled) else 0
+
+        low = round(random.uniform(0.3, 0.6), 2)
+        high = round(random.uniform(low + 0.1, 0.95), 2)
+
+        random_seed = random.randint(1, 999999)
+
+        # Unified variant/multi-wave
+        num_waves = random.randint(1, 2)
+        waves = []
+        for i in range(num_waves):
+            wave_day = random.randint(30 + i*30, 120 + i*30)
+            wave_beta = round(random.uniform(1.2, 2.5), 2)
+            wave_seed = random.randint(20, 100)
+            waves.append({"day": wave_day, "beta": wave_beta, "seed": wave_seed})
+    else:
+        days = batch_fixed.get('days') if batch_fixed.get('days') is not None else random.randint(90, 365)
+        max_init = max(1, min(population // 20, 5000))
+        initial_infected = random.randint(10, max_init)
+
+        mask_score = batch_fixed.get('mask_score') if batch_fixed.get('mask_score') is not None else random.randint(1, 10)
+        crowdedness_score = random.randint(1, 10)
+
+        quarantine_enabled = random.choice(["y", "n"])
+        seasonality_enabled = random.choice(["y", "n"])
+        interventions_enabled = random.choice(["y", "n"])
+        multi_wave = random.choice(["y", "n"])
+
+        vaccination_enabled = random.choice(["y", "n"])
+        daily_vaccination_rate = round(random.uniform(0.0, 0.02), 3)  # up to 2% per day
+        incubation_period = random.randint(2, 7)
+        testing_rate = random.choice(["low", "medium", "high"])
+        mask_decay_rate = round(random.uniform(0.005, 0.02), 4)
+
+        travel_enabled = random.choice(["y", "n"])
+        travel_max = random.randint(1, 10) if yn_to_bool(travel_enabled) else 0
+
+        low = round(random.uniform(0.3, 0.6), 2)
+        high = round(random.uniform(low + 0.1, 0.95), 2)
+
+        random_seed = random.randint(1, 999999)
+
+        # Unified variant/multi-wave
+        num_waves = batch_fixed.get('multi_wave_count') if batch_fixed.get('multi_wave_count') is not None else random.randint(1, 2)
+        wave_days = [int(x) for x in batch_fixed.get('wave_days', '').split(',')] if batch_fixed.get('wave_days') else [60 + i*30 for i in range(num_waves)]
+        wave_betas = [float(x) for x in batch_fixed.get('wave_betas', '').split(',')] if batch_fixed.get('wave_betas') else [2.5]*num_waves
+        wave_seeds = [int(x) for x in batch_fixed.get('wave_seeds', '').split(',')] if batch_fixed.get('wave_seeds') else [100]*num_waves
+        waves = []
+        for i in range(num_waves):
+            waves.append({
+                'day': wave_days[i] if i < len(wave_days) else 60 + i*30,
+                'beta': wave_betas[i] if i < len(wave_betas) else 2.5,
+                'seed': wave_seeds[i] if i < len(wave_seeds) else 100
+            })
+
+    params = {
+        "population": population,
+        "days": days,
+        "initial_infected": initial_infected,
+        "mask_score": mask_score,
+        "crowdedness_score": crowdedness_score,
+        "quarantine_enabled": quarantine_enabled,
+        "seasonality_enabled": seasonality_enabled,
+        "interventions_enabled": interventions_enabled,
+        "reporting_prob_min": low,
+        "reporting_prob_max": high,
+        "multi_wave": multi_wave,
+        "random_seed": random_seed,
+        "vaccination_enabled": vaccination_enabled,
+        "daily_vaccination_rate": daily_vaccination_rate,
+        "incubation_period": incubation_period,
+        "waves": waves,
+        "testing_rate": testing_rate,
+        "mask_decay_rate": mask_decay_rate,
+        "travel_enabled": travel_enabled,
+        "travel_max": travel_max,
+        "mode": "random",
+        "layers": batch_fixed.get('layers') if batch_fixed.get('layers') is not None else 2,
+        "age_groups": batch_fixed.get('age_groups') if batch_fixed.get('age_groups') is not None else 3
+    }
+    return params 
+
+
+
+================================================
+FILE: output.py
+================================================
+"""
+Output module for Epidemic Dataset Generator
+
+Handles saving simulation results (CSV, JSON) and plots.
+Now saves both a minimal and a full CSV.
+"""
+
+import os
+import json
+from config import BASE_SAVE_DIR
+from plotting import plot_sir, plot_reported, ensure_dir
+
+
+def save_outputs(df, params, out_dir, save_plots=True):
+    """
+    Save simulation results to CSV, JSON, and optionally plots.
+    Also saves a minimal CSV with just Day and Reported_Cases.
+    Args:
+        df (pd.DataFrame): Simulation results.
+        params (dict): Simulation parameters.
+        out_dir (str): Output directory.
+        save_plots (bool): Whether to save plots.
+    """
+    ensure_dir(out_dir)
+    # Full CSV (all columns)
+    csv_path = os.path.join(out_dir, "dataset.csv")
+    df.to_csv(csv_path, index=False)
+    # Minimal CSV (Day and Reported_Cases only)
+    minimal_cols = [col for col in ["Day", "Reported_Cases"] if col in df.columns]
+    minimal_path = os.path.join(out_dir, "reported_cases.csv")
+    df[minimal_cols].to_csv(minimal_path, index=False)
+    # JSON params
+    json_path = os.path.join(out_dir, "params.json")
+    with open(json_path, "w") as f:
+        json.dump(params, f, indent=4)
+    # Plots
+    sir_plot = os.path.join(out_dir, "stacked_sir.png")
+    reported_plot = os.path.join(out_dir, "reported_cases.png")
+    if save_plots:
+        plot_sir(df, sir_plot)
+        plot_reported(df, reported_plot)
+        print(f"  Plots: {sir_plot}, {reported_plot}")
+    print(f"\nData and plots saved in: {out_dir}")
+    print(f"  CSV  -> {csv_path}")
+    print(f"  Minimal CSV -> {minimal_path}")
+    print(f"  JSON -> {json_path}") 
+
+
+================================================
+FILE: plotting.py
+================================================
+"""
+Advanced plotting utilities for Epidemic Dataset Generator.
+
+This file is a **drop‑in replacement** for the plotting file you uploaded. It keeps
+the original `plot_sir()` and `plot_reported()` functions (so existing imports
+won't break) and adds all the new, more visual plots you requested:
+
+    • Compartment Heatmap (Day × S/E/I/R)
+    • New Exposed vs New Recoveries dual line
+    • Reported vs Actual Infections
+    • I & S Area + Reported overlay (scaled)
+    • Phase Diagram (I vs S, color by Day or Beta_Effective)
+    • 3D Day–Beta–Infected ribbon surface
+    • Streamgraph SEIR (centered “Theme River” style)
+    • Radial (polar) Seasonality + Infected overlay
+    • Beta vs Cases Scatter (colored by Day)
+
+All figures are saved at dpi=300. Seaborn is optional; the module falls back to a
+matplotlib style if Seaborn isn’t installed, so you will not crash.
+
+"""
+
+from __future__ import annotations
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.colors import Normalize
+from matplotlib import cm
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers 3D projection)
+
+
+try:  
+    import seaborn as sns  # type: ignore
+    _HAVE_SNS = True
+    sns.set_style("darkgrid")
+    sns.set_context("talk")
+except Exception:  # ImportError or runtime error
+    _HAVE_SNS = False
+    plt.style.use("seaborn-v0_8-darkgrid")  # built-in mpl style
+
+try:  # soft import (unused but harmless)
+    from config import BASE_SAVE_DIR  # type: ignore  # noqa: F401
+except Exception:  # keep module importable if config missing
+    BASE_SAVE_DIR = "."
+
+DEF_COMPARTMENTS = [ "Exposed", "Infected","Susceptible", "Recovered"]
+
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def _maybe_numpy(series):
+    """Return underlying numpy array, even if pandas Series."""
+    return getattr(series, "to_numpy", lambda: np.asarray(series))()
+
+
+def _get_colors(n: int, palette: str | None = "Set2"):
+    """Return *n* distinct colors; use Seaborn palette if available."""
+    if _HAVE_SNS and palette is not None:
+        return sns.color_palette(palette, n)
+    # fallback color cycle (color‑blind friendly-ish)
+    base = [
+        "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
+        "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ab",
+    ]
+    if n <= len(base):
+        return base[:n]
+    return [base[i % len(base)] for i in range(n)]
+
+def plot_sir(df: pd.DataFrame, path: str) -> None:
+    """Classic stacked SEIR compartments plot (Infected, Exposed, Susceptible, Recovered)."""
+    ensure_dir(os.path.dirname(path))
+    fig, ax = plt.subplots(figsize=(12, 7))
+    colors = _get_colors(4, palette="hls" if _HAVE_SNS else None)
+    ax.stackplot(
+        df["Day"],
+        df["Infected"],
+        df["Exposed"],
+        df["Susceptible"],
+        df["Recovered"],
+        labels=["Infected", "Exposed", "Susceptible", "Recovered"],
+        colors=colors,
+        alpha=0.9,
+    )
+    ax.set_title("Epidemic Simulation (SEIR Compartments)", fontsize=18, weight="bold")
+    ax.set_xlabel("Day", fontsize=14)
+    ax.set_ylabel("Population", fontsize=14)
+    ax.legend(loc="upper right", fontsize=11, frameon=True)
+    ax.grid(color="gray", linestyle="--", linewidth=0.5, alpha=0.7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+
+def plot_reported(df: pd.DataFrame, path: str) -> None:
+    """Reported cases over time (line, *no markers* as per your request)."""
+    ensure_dir(os.path.dirname(path))
+    fig, ax = plt.subplots(figsize=(12, 6))
+    color = _get_colors(1, palette="Set1")[0]
+    ax.plot(df["Day"], df["Reported_Cases"], label="Reported Cases", color=color, linewidth=2.5, alpha=0.9)
+    ax.set_title("Reported Cases Over Time", fontsize=18, weight="bold")
+    ax.set_xlabel("Day", fontsize=14)
+    ax.set_ylabel("Cases", fontsize=14)
+    ax.legend(fontsize=11, frameon=True)
+    ax.grid(color="gray", linestyle="--", linewidth=0.5, alpha=0.7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+# 1. Heatmap: Day × Compartment (S/E/I/R)
+
+def plot_compartment_heatmap(
+    df: pd.DataFrame,
+    path: str,
+    compartments=DEF_COMPARTMENTS,
+    log_scale: bool = False,
+    github_style: bool = True,
+    bins: int = 5,
+) -> None:
+    """GitHub‑style compartment heatmap.
+
+    By default (`github_style=True`), each compartment row is *independently* normalized
+    to its own max and rendered with a discrete color ramp (like the GitHub
+    contributions calendar). Each row uses a different Seaborn color family:
+
+        Susceptible → Blues
+        Exposed     → Oranges
+        Infected    → Reds
+        Recovered   → Greens
+
+    Set ``github_style=False`` to fall back to the original continuous ``viridis`` heatmap.
+    ``log_scale`` only applies in the non‑GitHub mode.
+    ``bins`` controls the number of discrete color steps (GitHub uses ~5).
+    """
+    ensure_dir(os.path.dirname(path))
+
+    # Extract numeric values (rows=compartments, cols=time)
+    values = df[compartments].to_numpy(dtype=float).T
+    n_comp, n_days = values.shape
+
+    if not github_style:
+        # Original continuous heatmap path
+        data = np.log10(np.clip(values, a_min=1, a_max=None)) if log_scale else values
+        fig, ax = plt.subplots(figsize=(max(8, n_days / 8), 4 + 0.5 * n_comp))
+        im = ax.imshow(data, aspect="auto", interpolation="nearest", cmap="viridis")
+        n = len(df)
+        step = max(1, n // 10)
+        idxs = np.arange(0, n, step)
+        ax.set_xticks(idxs)
+        ax.set_xticklabels(df["Day"].iloc[idxs])
+        ax.set_yticks(np.arange(n_comp))
+        ax.set_yticklabels(compartments)
+        ax.set_xlabel("Day", fontsize=14)
+        ax.set_title("Compartment Heatmap", fontsize=18, weight="bold")
+        cbar = fig.colorbar(im, ax=ax, shrink=0.9)
+        cbar.set_label("log10(Value)" if log_scale else "Population", rotation=270, labelpad=20)
+        fig.tight_layout()
+        fig.savefig(path, dpi=300)
+        plt.close(fig)
+        return
+
+    
+    # Row-wise max for scaling; avoid divide-by-zero
+    row_max = values.max(axis=1, keepdims=True)
+    row_max[row_max == 0] = 1.0
+    scaled = values / row_max
+
+    # Discretize to bins
+    edges = np.linspace(0, 1, bins + 1)
+    idx = np.digitize(scaled, edges, right=True)  # 0..bins
+    idx[idx > bins] = bins
+
+    # Choose seaborn palettes per compartment (fallback generic grays)
+    if _HAVE_SNS:
+        pal_map = {
+            'Susceptible': sns.color_palette("Blues", bins + 1),
+            'Exposed': sns.color_palette("Oranges", bins + 1),
+            'Infected': sns.color_palette("Reds", bins + 1),
+            'Recovered': sns.color_palette("Greens", bins + 1),
+        }
+    else:
+        # fallback: grayscale ramp reused for all
+        gray_pal = [str(x) for x in np.linspace(0.9, 0.1, bins + 1)]
+        pal_map = {c: gray_pal for c in compartments}
+
+    # color conversion helper (local import avoids global clutter)
+    from matplotlib.colors import to_rgb as _to_rgb
+
+    # Build image array
+    img = np.zeros((n_comp, n_days, 3))
+    for r, comp in enumerate(compartments):
+        pal = pal_map.get(comp, pal_map[next(iter(pal_map))])
+        pal_rgb = [_to_rgb(clr) for clr in pal]
+        for c in range(n_days):
+            img[r, c] = pal_rgb[idx[r, c]]
+
+    fig, ax = plt.subplots(figsize=(max(8, n_days / 8), 4 + 0.5 * n_comp))
+    ax.imshow(img, aspect="auto", interpolation="nearest")
+
+    # X ticks
+    n = len(df)
+    step = max(1, n // 10)
+    idxs = np.arange(0, n, step)
+    ax.set_xticks(idxs)
+    ax.set_xticklabels(df["Day"].iloc[idxs])
+
+    # Y ticks
+    ax.set_yticks(np.arange(n_comp))
+    ax.set_yticklabels(compartments)
+
+    ax.set_xlabel("Day", fontsize=14)
+    ax.set_title("Compartment Heatmap", fontsize=18, weight="bold")
+
+    # Legend: darkest swatch per compartment
+    import matplotlib.patches as mpatches
+    handles = []
+    for comp in compartments:
+        handles.append(mpatches.Patch(color=pal_map.get(comp)[-1], label=comp))
+    ax.legend(handles=handles, loc="upper right", fontsize=10, frameon=True)
+
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+# 2. Dual line: New Exposed vs New Recoveries
+
+def plot_new_exposed_vs_new_recoveries(df: pd.DataFrame, path: str) -> None:
+    """Dual line plot of `New_Exposed` and `New_Recoveries`."""
+    ensure_dir(os.path.dirname(path))
+    fig, ax = plt.subplots(figsize=(12, 6))
+    colors = _get_colors(2, palette="Set1")
+    ax.plot(df["Day"], df["New_Exposed"], label="New Exposed", color=colors[0], linewidth=2.0)
+    ax.plot(df["Day"], df["New_Recoveries"], label="New Recoveries", color=colors[1], linewidth=2.0)
+    ax.set_title("New Exposed vs New Recoveries", fontsize=18, weight="bold")
+    ax.set_xlabel("Day", fontsize=14)
+    ax.set_ylabel("Count", fontsize=14)
+    ax.legend(fontsize=11, frameon=True)
+    ax.grid(color="gray", linestyle="--", linewidth=0.5, alpha=0.7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+# 3. Reported vs Actual Infections
+
+def plot_reported_vs_actual_infections(
+    df: pd.DataFrame,
+    path: str,
+    actual_col: str = "New_Infections",
+) -> None:
+    """Compare reported cases to actual infections (daily counts)."""
+    ensure_dir(os.path.dirname(path))
+    fig, ax = plt.subplots(figsize=(12, 6))
+    colors = _get_colors(2, palette="Set1")
+    ax.plot(df["Day"], df[actual_col], label="Actual Infections", color=colors[0], linewidth=2.5)
+    ax.plot(
+        df["Day"],
+        df["Reported_Cases"],
+        label="Reported Cases",
+        color=colors[1],
+        linewidth=2.5,
+        linestyle="--",
+    )
+    ax.set_title("Reported vs Actual Infections", fontsize=18, weight="bold")
+    ax.set_xlabel("Day", fontsize=14)
+    ax.set_ylabel("Daily Count", fontsize=14)
+    ax.legend(fontsize=11, frameon=True)
+    ax.grid(color="gray", linestyle="--", linewidth=0.5, alpha=0.7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+# 4. Area Chart for I & S + Reported overlay
+
+def plot_is_area_with_reported(df: pd.DataFrame, path: str) -> None:
+    """Stacked area (Infected over Susceptible) + bold line for Reported_Cases.
+
+    Reported is scaled to the S+I axis range so it remains visible when counts
+    are in different units.
+    """
+    ensure_dir(os.path.dirname(path))
+    fig, ax = plt.subplots(figsize=(12, 6))
+    colors = _get_colors(2, palette="Set2")
+    ax.stackplot(
+        df["Day"],
+        df["Infected"],
+        df["Susceptible"],
+        colors=colors,
+        labels=["Infected", "Susceptible"],
+        alpha=0.6,
+    )
+    ax.set_xlabel("Day", fontsize=14)
+    ax.set_ylabel("Population", fontsize=14)
+    ax.grid(color="gray", linestyle="--", linewidth=0.5, alpha=0.7)
+    # Overlay reported cases scaled to population axis
+    reported = _maybe_numpy(df["Reported_Cases"])
+    pop_max = max((df["Infected"].max() + df["Susceptible"].max()), 1)
+    rep_max = reported.max() if reported.size else 1
+    scale = pop_max / rep_max if rep_max > 0 else 1
+    ax.plot(df["Day"], reported * scale, color="black", linewidth=2.5, label="Reported (scaled)")
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles, labels, loc="upper right", fontsize=11, frameon=True)
+    ax.set_title("I & S Area + Reported Cases Overlay", fontsize=18, weight="bold")
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+def plot_phase_diagram_beta(df: pd.DataFrame, path: str, x: str = "Susceptible", y: str = "Infected", color_by: str = "Beta_Effective") -> None:
+    """Phase trajectory colored by Beta_Effective (default I vs S)."""
+    ensure_dir(os.path.dirname(path))
+    fig, ax = plt.subplots(figsize=(7, 7))
+    xvals = df[x].to_numpy()
+    yvals = df[y].to_numpy()
+    if color_by in df.columns:
+        cvals = df[color_by].to_numpy()
+    else:
+        cvals = np.arange(len(df))
+    sc = ax.scatter(xvals, yvals, c=cvals, cmap="viridis", s=25, edgecolor="none")
+    ax.plot(xvals, yvals, color="gray", alpha=0.4, linewidth=1.0)
+    ax.set_xlabel(x, fontsize=14)
+    ax.set_ylabel(y, fontsize=14)
+    ax.set_title(f"Phase Diagram ({y} vs {x}) colored by {color_by}", fontsize=16, weight="bold")
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
+    cbar.set_label(color_by, rotation=270, labelpad=20)
+    ax.grid(color="gray", linestyle="--", linewidth=0.5, alpha=0.7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+def plot_phase_diagram_I_vs_R_beta(df: pd.DataFrame, path: str, color_by: str = "Beta_Effective") -> None:
+    """Phase trajectory I vs R colored by Beta_Effective."""
+    plot_phase_diagram_beta(df, path, x="Recovered", y="Infected", color_by=color_by)
+
+
+
+
+# ------------------------------------------------------------------
+# 6. 3D Surface: Day × Beta_Effective × Infected
+# ------------------------------------------------------------------
+
+def plot_3d_day_beta_infected(df: pd.DataFrame, path: str, surface: bool = True) -> None:
+    """3D visualization of Day, Beta_Effective, and Infected.
+
+    With a single time series we can’t create a full gridded surface; instead we
+    create a *ribbon* by duplicating the curve (trisurf) for a cool look. Set
+    `surface=False` to draw only the 3D line.
+    """
+    ensure_dir(os.path.dirname(path))
+    day = _maybe_numpy(df["Day"])
+    beta = _maybe_numpy(df["Beta_Effective"]) if "Beta_Effective" in df.columns else np.zeros_like(day)
+    inf = _maybe_numpy(df["Infected"])
+
+    fig = plt.figure(figsize=(10, 7))
+    ax = fig.add_subplot(111, projection="3d")
+
+    if surface and len(day) > 1:
+        width = (beta.max() - beta.min()) * 0.01 if np.ptp(beta) > 0 else 0.01
+        day2 = np.concatenate([day, day])
+        beta2 = np.concatenate([beta - width, beta + width])
+        inf2 = np.concatenate([inf, inf])
+        ax.plot_trisurf(day2, beta2, inf2, cmap="viridis", alpha=0.8, linewidth=0.2, edgecolor="none")
+    else:
+        ax.plot(day, beta, inf, color="black", linewidth=2.0)
+
+    ax.set_xlabel("Day")
+    ax.set_ylabel("Beta_Effective")
+    ax.set_zlabel("Infected")
+    ax.set_title("3D Day–Beta–Infected", weight="bold")
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+
+def plot_beta_vs_seasonality(
+    df: pd.DataFrame,
+    path: str,
+    style: str = "scatter_line",
+    color_by: str = "Day",
+) -> None:
+    """XY plot of Beta_Effective (x) vs Seasonality (y).
+
+    Parameters
+    ----------
+    style : {'scatter_line', 'scatter', 'line'}
+        * ``scatter_line`` (default) draws a light connecting line in addition to points.
+        * ``scatter`` plots only points.
+        * ``line`` plots only a line in temporal order.
+    color_by : column name used to color points (only for scatter_*)
+        Defaults to ``Day`` so early/late points are distinguishable.
+    """
+    ensure_dir(os.path.dirname(path))
+    if 'Beta_Effective' not in df.columns or 'Seasonality' not in df.columns:
+        print('[WARN] plot_beta_vs_seasonality: required columns missing; skipping.')
+        return
+
+    x = df['Beta_Effective'].to_numpy()
+    y = df['Seasonality'].to_numpy()
+    fig, ax = plt.subplots(figsize=(7, 7))
+
+    if style in ("scatter_line", "scatter"):
+        if color_by in df.columns:
+            cvals = df[color_by].to_numpy()
+        else:
+            cvals = None
+        sc = ax.scatter(x, y, c=cvals, cmap='viridis' if cvals is not None else None,
+                        s=40, alpha=0.9, edgecolor='k', linewidth=0.3)
+        if cvals is not None:
+            cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
+            cbar.set_label(color_by, rotation=270, labelpad=20)
+        if style == "scatter_line":
+            # connect in Day order (sorted by index)
+            ax.plot(x, y, color='gray', alpha=0.4, linewidth=1.0)
+    else:  # line only
+        ax.plot(x, y, color='black', linewidth=2.0)
+
+    ax.set_xlabel('Beta_Effective', fontsize=14)
+    ax.set_ylabel('Seasonality', fontsize=14)
+    ax.set_title('Beta vs Seasonality', fontsize=16, weight='bold')
+    ax.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+# 8. Circular / Radial Seasonality Plot
+
+
+def plot_radial_seasonality(df: pd.DataFrame, path: str, period: int | None = None) -> None:
+    """Polar plot showing seasonality (and scaled infections) over a cycle.
+
+    period : length of full seasonal cycle in days; inferred from data if None.
+    """
+    ensure_dir(os.path.dirname(path))
+    day = _maybe_numpy(df["Day"]).astype(float)
+    if period is None:
+        period = int(day.max() - day.min() + 1)
+    theta = 2 * np.pi * ((day - day.min()) % period) / period
+    season = _maybe_numpy(df["Seasonality"]) if "Seasonality" in df.columns else np.ones_like(day)
+    infected = _maybe_numpy(df["Infected"])
+
+    fig = plt.figure(figsize=(8, 8))
+    ax = fig.add_subplot(111, projection="polar")
+    ax.plot(theta, season, label="Seasonality", linewidth=2.5)
+    if infected.max() > 0:
+        inf_scaled = infected / infected.max() * season.max()
+        ax.plot(theta, inf_scaled, label="Infected (scaled)", linewidth=1.5, linestyle="--")
+    ax.set_title("Radial Seasonality & Infections", fontsize=16, weight="bold", pad=20)
+    ax.set_theta_direction(-1)  # clockwise
+    ax.set_theta_zero_location("N")  # 0 at top
+    ax.legend(loc="upper right", bbox_to_anchor=(1.2, 1.1))
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+
+# ------------------------------------------------------------------
+# 9. Beta vs Cases Scatter (colored by Day)
+# ------------------------------------------------------------------
+
+def plot_beta_vs_cases(df: pd.DataFrame, path: str) -> None:
+    """Scatter Beta_Effective vs New_Infections colored by Day."""
+    ensure_dir(os.path.dirname(path))
+    beta = _maybe_numpy(df["Beta_Effective"]) if "Beta_Effective" in df.columns else np.zeros(len(df))
+    cases = _maybe_numpy(df["New_Infections"])
+    day = _maybe_numpy(df["Day"])
+
+    fig, ax = plt.subplots(figsize=(7, 7))
+    sc = ax.scatter(beta, cases, c=day, cmap="viridis", s=40, alpha=0.9, edgecolor="k", linewidth=0.3)
+    ax.set_xlabel("Beta_Effective", fontsize=14)
+    ax.set_ylabel("New Infections", fontsize=14)
+    ax.set_title("Beta vs New Infections (colored by Day)", fontsize=16, weight="bold")
+    cbar = fig.colorbar(sc, ax=ax, shrink=0.8)
+    cbar.set_label("Day", rotation=270, labelpad=20)
+    ax.grid(color="gray", linestyle="--", linewidth=0.5, alpha=0.7)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+
+
+# ------------------------------------------------------------------
+# Convenience: generate everything available
+# ------------------------------------------------------------------
+
+def save_all_advanced_plots(df: pd.DataFrame, out_dir: str) -> None:
+    """Generate a suite of advanced plots for the given dataframe."""
+    ensure_dir(out_dir)
+    plot_compartment_heatmap(df, os.path.join(out_dir, "heatmap.png"))
+    plot_sir(df, os.path.join(out_dir, "sir_plot.png"))
+    plot_reported(df, os.path.join(out_dir, "reported_cases.png"))
+    plot_new_exposed_vs_new_recoveries(df, os.path.join(out_dir, "new_exposed_vs_recoveries.png"))
+    plot_reported_vs_actual_infections(df, os.path.join(out_dir, "reported_vs_actual.png"))
+    plot_is_area_with_reported(df, os.path.join(out_dir, "is_area_reported.png"))
+    plot_phase_diagram_beta(df, os.path.join(out_dir, "phase_I_vs_S_day.png"), color_by="Beta_Effective")
+    if "Beta_Effective" in df.columns:
+        plot_phase_diagram_I_vs_R_beta(df, os.path.join(out_dir, "phase_I_vs_R_beta.png"), color_by="Beta_Effective")
+        plot_3d_day_beta_infected(df, os.path.join(out_dir, "3d_day_beta_infected.png"), surface=True)
+        plot_beta_vs_cases(df, os.path.join(out_dir, "beta_vs_cases.png"))
+    if "Seasonality" in df.columns:
+        plot_radial_seasonality(df, os.path.join(out_dir, "radial_seasonality.png"))
+    try:
+        plot_beta_vs_seasonality(df, os.path.join(out_dir, "streamgraph_seir.png"))
+    except Exception:
+        pass  # ignore if compartments missing
+
+
+__all__ = [
+    "plot_sir",
+    "plot_reported",
+    "plot_compartment_heatmap",
+    "plot_new_exposed_vs_new_recoveries",
+    "plot_reported_vs_actual_infections",
+    "plot_is_area_with_reported",
+    "plot_phase_diagram_beta",
+    "plot_phase_diagram_I_vs_R_beta",
+    "plot_3d_day_beta_infected",
+    "plot_beta_vs_seasonality",
+    "plot_radial_seasonality",
+    "plot_beta_vs_cases",
+    "save_all_advanced_plots",
+]
+
+
+
+================================================
+FILE: requirements.txt
+================================================
+numpy
+pandas
+matplotlib 
+
+
+================================================
+FILE: simulation.py
+================================================
+"""
+Simulation module for Epidemic Dataset Generator
+
+Contains the SEIR/SIR simulation logic as a function.
+Enhanced: Multi-layer, age-structured, and selective intervention SEIR.
+All interactive mode parameters are now implemented for the multi-layer model.
+"""
+
+import numpy as np
+import pandas as pd
+from config import (
+    GAMMA, INT_DURATION, CENTER_SIGMA_FRAC, VARIANT_WAVE_DURATION, INCUBATION_PERIOD_DEFAULT,
+    MASK_SCORE_SCALING, CROWD_SCORE_SCALING, QUARANTINE_EFFECT_SCALING, VACCINATION_EFFECT_SCALING
+)
+from input_handlers import yn_to_bool
+
+
+def sigmoid_ramp(t, center, width):
+    return 1 / (1 + np.exp(-(t - center) / width))
+
+def variable_seasonality(t, amp, period, phase=0):
+    return 1 + amp * np.sin(2 * np.pi * (t + phase) / period)
+
+
+def simulate_epidemic(params, use_sir=False):
+    """
+    Multi-layer, age-structured SEIR simulation with all interactive mode parameters implemented.
+    Args:
+        params (dict): Simulation parameters.
+        use_sir (bool): If True, use SIR model; else SEIR.
+    Returns:
+        pd.DataFrame: Simulation results (aggregated across layers/ages).
+    """
+    seed = params["random_seed"]
+    rng = np.random.default_rng(seed)
+    N = params["population"]
+    days = params["days"]
+    n_layers = params.get("layers", 1)
+    n_ages = params.get("age_groups", 1)
+    # Split population evenly by default
+    pop_layer = np.full(n_layers, N // n_layers)
+    pop_layer[:N % n_layers] += 1
+    pop_age = np.full(n_ages, N // n_ages)
+    pop_age[:N % n_ages] += 1
+    pop_matrix = np.full((n_layers, n_ages), N // (n_layers * n_ages))
+    for i in range(N % (n_layers * n_ages)):
+        pop_matrix[i % n_layers, i % n_ages] += 1
+    S = pop_matrix.copy()
+    E = np.zeros((n_layers, n_ages), dtype=int)
+    I = np.zeros((n_layers, n_ages), dtype=int)
+    R = np.zeros((n_layers, n_ages), dtype=int)
+    initial_infected = params["initial_infected"]
+    # Improved seeding: distribute initial infections evenly across all groups
+    infected_to_seed = initial_infected
+    group_indices = [(l, a) for l in range(n_layers) for a in range(n_ages)]
+    idx = 0
+    while infected_to_seed > 0:
+        l, a = group_indices[idx % len(group_indices)]
+        if S[l, a] > 0:
+            S[l, a] -= 1
+            I[l, a] += 1
+            infected_to_seed -= 1
+        idx += 1
+    beta_base = 0.3
+    seasonality = yn_to_bool(params["seasonality_enabled"])
+    quarantine = yn_to_bool(params["quarantine_enabled"])
+    interventions = yn_to_bool(params["interventions_enabled"])
+    vaccination = yn_to_bool(params.get("vaccination_enabled", "n"))
+    daily_vaccination_rate = params.get("daily_vaccination_rate", 0.0)
+    incubation_period = params.get("incubation_period", INCUBATION_PERIOD_DEFAULT)
+    testing_rate = params.get("testing_rate", "medium")
+    mask_decay_rate = params.get("mask_decay_rate", 0.01)
+    travel = yn_to_bool(params.get("travel_enabled", "n"))
+    travel_max = params.get("travel_max", 0)
+    mask_score = params.get("mask_score", 4)
+    crowdedness_score = params.get("crowdedness_score", 6)
+    p_min, p_max = params["reporting_prob_min"], params["reporting_prob_max"]
+    base_report_probs = np.linspace(p_min, p_max, days)
+    if interventions:
+        int_start = days // 3
+        int_end = int_start + INT_DURATION
+    else:
+        int_start = int_end = -1
+    waves = params.get("waves", [])
+    if 'seasonal_amp' in params:
+        seasonal_amp = params['seasonal_amp']
+    else:
+        seasonal_amp = rng.uniform(0.2, 0.5)
+    if 'seasonal_period' in params:
+        seasonal_period = params['seasonal_period']
+    else:
+        seasonal_period = rng.integers(60, 181)
+    seasonal_phase = rng.uniform(0, seasonal_period)
+    susceptibility = np.ones((n_layers, n_ages))
+    contact_matrix = np.full((n_layers, n_layers), 0.05)
+    np.fill_diagonal(contact_matrix, 1.0)
+    gamma_matrix = np.full((n_layers, n_ages), GAMMA)
+    rows = []
+    # For low-level persistence: set a minimum infection+exposed threshold and reseed if below
+    infection_floor_threshold = max(5, int(0.0005 * N))  # e.g., 0.05% of population or at least 5
+    reseed_interval = 7  # days between possible reseeding events
+    reseed_size = max(1, int(0.0002 * N))  # e.g., 0.02% of population or at least 1
+    for t in range(days):
+        beta_t = np.full((n_layers, n_ages), beta_base)
+        # Mask effect (configurable)
+        mask_effect = 1 - (MASK_SCORE_SCALING * mask_score)
+        # Crowding effect (configurable)
+        crowd_effect = 1 + (CROWD_SCORE_SCALING * (crowdedness_score - 1))
+        beta_t *= mask_effect * crowd_effect
+        if seasonality:
+            seasonal_effect = variable_seasonality(t, seasonal_amp, seasonal_period, phase=seasonal_phase)
+            beta_t *= seasonal_effect
+        else:
+            seasonal_effect = 1.0
+        beta_multiplier = 1.0
+        for wave in waves:
+            onset = wave['day']
+            offset = wave['day'] + wave.get('duration', VARIANT_WAVE_DURATION)
+            ramp = wave.get('ramp', 7)
+            ramp_up = sigmoid_ramp(t, onset + ramp/2, ramp)
+            ramp_down = 1 - sigmoid_ramp(t, offset - ramp/2, ramp)
+            wave_effect = ramp_up * ramp_down
+            beta_multiplier += (wave['beta'] - 1.0) * wave_effect
+        beta_t *= beta_multiplier
+        beta_effective = beta_t.mean()  # Average beta across all layers and ages
+        # Calculate Rt (time-dependent reproduction number)
+        Rt = beta_effective * (S.sum() / N)
+        # --- Abrupt interventions (previous logic, threshold now 10%) ---
+        for l in range(n_layers):
+            for a in range(n_ages):
+                case_frac = I[l, a] / max(pop_matrix[l, a], 1)
+                if case_frac > 0.10:  # 10% infected triggers intervention (was 5%)
+                    beta_t[l, a] *= 0.5  # halve transmission for high-contact
+        # --- End abrupt interventions ---
+        # Quarantine: reduce effective infectious pool if enabled
+        eff_I = I.copy()
+        if quarantine:
+            eff_I = (I * (1 - QUARANTINE_EFFECT_SCALING)).astype(int)
+        # Travel: import new exposed cases into random groups/layers (stochastic)
+        if travel and travel_max > 0:
+            # Vary travel_max stochastically each day (0 to travel_max)
+            today_travel = rng.integers(0, travel_max + 1)
+            for _ in range(today_travel):
+                l = rng.integers(0, n_layers)
+                a = rng.integers(0, n_ages)
+                E[l, a] += 1
+        # Low-level persistence: reseed if total infected+exposed is very low, every reseed_interval days
+        if (t % reseed_interval == 0) and ((I.sum() + E.sum()) < infection_floor_threshold):
+            for _ in range(reseed_size):
+                l = rng.integers(0, n_layers)
+                a = rng.integers(0, n_ages)
+                if S[l, a] > 0:
+                    S[l, a] -= 1
+                    E[l, a] += 1
+        # Vaccination: remove susceptibles and add to recovered for all groups
+        if vaccination:
+            for l in range(n_layers):
+                for a in range(n_ages):
+                    vaccinated_today = min(S[l, a], int(S[l, a] * daily_vaccination_rate))
+                    effective_vaccinated = int(vaccinated_today * VACCINATION_EFFECT_SCALING)
+                    S[l, a] -= effective_vaccinated
+                    R[l, a] += effective_vaccinated
+        new_E = np.zeros((n_layers, n_ages), dtype=int)
+        for l in range(n_layers):
+            for a in range(n_ages):
+                lambda_within = beta_t[l, a] * susceptibility[l, a] * eff_I[l, a] / max(pop_matrix[l, a], 1)
+                lambda_between = 0.0
+                for l2 in range(n_layers):
+                    if l2 != l:
+                        lambda_between += contact_matrix[l, l2] * beta_t[l2, a] * susceptibility[l2, a] * eff_I[l2, a] / max(pop_matrix[l2, a], 1)
+                lambda_total = lambda_within + lambda_between
+                p_inf = 1.0 - np.exp(-lambda_total)
+                p_inf = np.clip(p_inf, 0, 1)
+                n_S = S[l, a]
+                n_new_E = rng.binomial(n_S, p_inf) if n_S > 0 else 0
+                S[l, a] -= n_new_E
+                new_E[l, a] = n_new_E
+        new_I = np.zeros((n_layers, n_ages), dtype=int)
+        new_R = np.zeros((n_layers, n_ages), dtype=int)
+        for l in range(n_layers):
+            for a in range(n_ages):
+                n_E = E[l, a]
+                n_new_I = rng.binomial(n_E, 1.0 / incubation_period) if n_E > 0 else 0
+                E[l, a] -= n_new_I
+                new_I[l, a] = n_new_I
+                n_I = I[l, a]
+                gamma = gamma_matrix[l, a]
+                p_rec = 1.0 - np.exp(-gamma)
+                n_new_R = rng.binomial(n_I, p_rec) if n_I > 0 else 0
+                I[l, a] += n_new_I - n_new_R
+                R[l, a] += n_new_R
+                new_R[l, a] = n_new_R
+        E += new_E
+        S_tot = S.sum()
+        E_tot = E.sum()
+        I_tot = I.sum()
+        R_tot = R.sum()
+        new_E_tot = new_E.sum()
+        new_I_tot = new_I.sum()
+        new_R_tot = new_R.sum()
+        # Testing rate: adjust reporting probability and lag (all rates lowered)
+        if testing_rate == "low":
+            t_report_p = max(base_report_probs[t] * 0.4, 0.01)  # was 0.7
+            report_lag = 2
+        elif testing_rate == "high":
+            t_report_p = min(base_report_probs[t], 0.95)  # was 1.2*base, now same as old medium
+            report_lag = 0
+        else:  # medium
+            t_report_p = max(base_report_probs[t] * 0.7, 0.01)  # was 0.7 for low, now for medium
+            report_lag = 1
+        # Reporting lag: shift reported cases by lag days (simple: no lag memory)
+        reported_cases = rng.binomial(new_I_tot, t_report_p) if new_I_tot > 0 else 0
+        rows.append([
+            t, S_tot, E_tot, I_tot, R_tot, new_E_tot, new_I_tot, new_R_tot, reported_cases, beta_effective, seasonal_effect, Rt
+        ])
+    df = pd.DataFrame(rows, columns=[
+        "Day", "Susceptible", "Exposed", "Infected", "Recovered",
+        "New_Exposed", "New_Infections", "New_Recoveries", "Reported_Cases",
+        "Beta_Effective", "Seasonality", "Rt"
+    ])
+    return df
+
+
+================================================
+FILE: submit.bat
+================================================
+@echo off
+:: Auto Git Commit and Push Script (Only if changes exist)
+
+:: Navigate to your project folder
+cd /d "C:\Users\rishu narwal\Desktop\BIGBOY1.1"
+
+:: Check for changes
+for /f %%i in ('git status --porcelain') do set changes=true
+
+if not defined changes (
+    echo No changes detected. Exiting.
+    pause
+    exit /b
+)
+
+:: Stage changes
+git add .
+
+:: Commit with timestamp
+set datetime=%date% %time%
+git commit -m "commit on %datetime%"
+git push origin main
+
+echo loose? I dont loose, I win , that's my job that's what i do
+pause
+
+
+
+================================================
+FILE: Conc/BIGBOY1.1.py
+================================================
+"""
+Epidemic Dataset Generator
+
+Two modes:
+    1) Random auto mode (default): python epidemic_generator.py
+    2) Interactive mode:          python epidemic_generator.py interact
+
+Generates a stochastic SIR-style epidemic with:
+- Mask & crowdedness behavior modifying beta
+- Quarantine reducing infectious pool
+- Seasonality (optional)
+- Intervention (optional; fixed window)
+- Multi-wave (optional; late beta boost)
+- Central-peaked epidemic envelope (Gaussian)
+- Random dropper: irregular case drops (simulate reporting/behavior shocks)
+- Reporting probability ramp + day-to-day jitter
+- Outputs dataset.csv, params.json, and plots in timestamped run folder
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import json
+import os
+import sys
+import random
+from datetime import datetime
+import argparse
+
+# =========================================================
+# GLOBAL CONFIG
+# =========================================================
+BASE_SAVE_DIR = r"C:\Users\rishu narwal\Desktop\SVM_FDE\datasets"
+
+# Behavioral beta scaling caps
+MASK_MAX_REDUCTION = 0.6       # mask_score=10 -> -60% beta
+CROWD_MAX_INCREASE = 0.7       # crowd_score=10 -> +70% beta
+
+# Seasonality defaults
+SEASONAL_AMP = 0.25            # +/- 25%
+SEASONAL_PERIOD = 60           # 60-day cycle
+
+# Quarantine
+QUARANTINE_FRACTION = 0.5      # 50% of infected effectively isolated if enabled
+
+# Recovery rate (gamma)
+GAMMA = 0.08                   # slower recovery than before -> longer epidemic
+
+# Central peak envelope (Gaussian)
+CENTER_AMP = 0.5               # up to +50% beta at mid-epidemic
+CENTER_SIGMA_FRAC = 0.2        # width = fraction of total days (std dev)
+
+# Multi-wave second bump (multiplicative)
+MULTIWAVE_BETA_MULT = 1.5      # 50% beta increase during second wave
+MULTIWAVE_DURATION = 20        # days
+
+# Intervention window (if enabled)
+INT_DURATION = 14              # days
+INT_MULTIPLIER = 0.4           # 60% beta reduction
+
+# Reporting jitter
+REPORT_SIGMA_ABS = 0.05        # absolute +/- noise to reporting prob
+REPORT_CLIP_MIN = 0.0
+REPORT_CLIP_MAX = 0.99
+
+# Random dropper
+DROP_MIN_INTERVAL = 1         # min days between drops
+DROP_MAX_INTERVAL = 3       # max days between drops
+DROP_MIN_CASES = 1
+DROP_MAX_CASES = 17
+
+# Add new global config for vaccination, variant, and mask decay
+default_vaccination_rate = 0.0  # default: 0% per day
+VARIANT_BETA_MULTIPLIER_DEFAULT = 1.5
+VARIANT_DAY_DEFAULT = 60
+INCUBATION_PERIOD_DEFAULT = 4  # days
+MASK_DECAY_RATE_DEFAULT = 0.01  # 1% per day
+
+# Multi-wave second bump (multiplicative)
+MULTIWAVE_BETA_MULT = 1.5      # 50% beta increase during second wave
+MULTIWAVE_DURATION = 20        # days
+
+# Intervention window (if enabled)
+INT_DURATION = 14              # days
+INT_MULTIPLIER = 0.4           # 60% beta reduction
+
+# Variant wave duration
+VARIANT_WAVE_DURATION = 40  # days for a more dramatic, realistic wave
+
+# Matplotlib non-interactive backend safety (in case)
+plt.switch_backend("Agg")
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+def ts():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+
+def yn_to_bool(v: str) -> bool:
+    return str(v).strip().lower() in ("y", "yes", "true", "1")
+
+
+# =========================================================
+# INTERACTIVE INPUTS
+# =========================================================
+def get_user_inputs():
+    print("\n=== INTERACTIVE MODE ===")
+
+    # population
+    pop = input("Population [73500]: ").strip()
+    population = int(pop) if pop else 73500
+    if population > 1_000_000:
+        print("Population capped at 1,000,000.")
+        population = 1_000_000
+    if population < 1000:
+        print("Population too low; forcing 1000.")
+        population = 1000
+
+    # days
+    d = input("Number of days [180]: ").strip()
+    days = int(d) if d else 180
+    if days < 30:
+        print("Days too low; forcing 30.")
+        days = 30
+
+    # initial infected
+    ii = input("Initial infected [50]: ").strip()
+    initial_infected = int(ii) if ii else 50
+    max_init = max(1, min(population // 20, 5000))  # <=5% of pop, cap 5000
+    if initial_infected > max_init:
+        print(f"Initial infected capped at {max_init}.")
+        initial_infected = max_init
+    if initial_infected < 1:
+        initial_infected = 1
+
+    # mask and crowd
+    ms = input("Mask adherence 1-10 [4]: ").strip()
+    mask_score = int(ms) if ms else 4
+    mask_score = min(max(mask_score, 1), 10)
+
+    cs = input("Crowdedness 1-10 [6]: ").strip()
+    crowdedness_score = int(cs) if cs else 6
+    crowdedness_score = min(max(crowdedness_score, 1), 10)
+
+    # feature flags
+    quarantine_enabled = input("Enable quarantine (y/n) [y]: ").strip() or "y"
+    seasonality_enabled = input("Enable seasonality (y/n) [y]: ").strip() or "y"
+    interventions_enabled = input("Enable interventions (y/n) [y]: ").strip() or "y"
+    multi_wave = input("Enable multi-wave (y/n) [n]: ").strip() or "n"
+
+    # vaccination
+    vaccination_enabled = input("Enable vaccination (y/n) [n]: ").strip() or "n"
+    daily_vaccination_rate = input("Daily vaccination rate (fraction, e.g. 0.01 for 1%) [0.0]: ").strip()
+    daily_vaccination_rate = float(daily_vaccination_rate) if daily_vaccination_rate else 0.0
+
+    # incubation period
+    incubation_period = input(f"Incubation period (days) [{INCUBATION_PERIOD_DEFAULT}]: ").strip()
+    incubation_period = int(incubation_period) if incubation_period else INCUBATION_PERIOD_DEFAULT
+
+    # Unified variant/multi-wave
+    num_waves = input("How many variant/multi-wave events? [1]: ").strip()
+    num_waves = int(num_waves) if num_waves else 1
+    waves = []
+    for i in range(num_waves):
+        print(f"--- Wave {i+1} ---")
+        wave_day = input(f"  Day of wave [e.g., {60 + i*30}]: ").strip()
+        wave_day = int(wave_day) if wave_day else (60 + i*30)
+        wave_beta = input("  Beta multiplier [e.g., 2.5 for dramatic wave]: ").strip()
+        wave_beta = float(wave_beta) if wave_beta else 2.5  # More dramatic default
+        wave_seed = input("  Seed new exposed (number) [e.g., 100 for dramatic wave]: ").strip()
+        wave_seed = int(wave_seed) if wave_seed else 100  # More dramatic default
+        waves.append({"day": wave_day, "beta": wave_beta, "seed": wave_seed})
+
+    # testing intensity
+    testing_rate = input("Testing rate (low/medium/high) [medium]: ").strip() or "medium"
+
+    # mask decay
+    mask_decay_rate = input(f"Mask decay rate per day (fraction, e.g. 0.01 for 1%) [{MASK_DECAY_RATE_DEFAULT}]: ").strip()
+    mask_decay_rate = float(mask_decay_rate) if mask_decay_rate else MASK_DECAY_RATE_DEFAULT
+
+    # travel between cities
+    travel_enabled = input("Enable travel between cities (y/n) [n]: ").strip() or "n"
+    travel_max = 0
+    if yn_to_bool(travel_enabled):
+        travel_max_in = input("Travel (number of new exposed imported per day, 1–10) [3]: ").strip()
+        travel_max = int(travel_max_in) if travel_max_in else 3
+
+    # reporting range
+    rpmin = input("Reporting probability min [0.6]: ").strip()
+    reporting_prob_min = float(rpmin) if rpmin else 0.6
+    rpmax = input("Reporting probability max [0.85]: ").strip()
+    reporting_prob_max = float(rpmax) if rpmax else 0.85
+    if reporting_prob_max <= reporting_prob_min:
+        print("Max must be > min; adjusting.")
+        reporting_prob_max = min(0.95, reporting_prob_min + 0.1)
+
+    # seed
+    seed_in = input("Random seed [auto]: ").strip()
+    random_seed = None if not seed_in or seed_in.lower() == "auto" else int(seed_in)
+
+    params = {
+        "population": population,
+        "days": days,
+        "initial_infected": initial_infected,
+        "mask_score": mask_score,
+        "crowdedness_score": crowdedness_score,
+        "quarantine_enabled": quarantine_enabled,
+        "seasonality_enabled": seasonality_enabled,
+        "interventions_enabled": interventions_enabled,
+        "reporting_prob_min": reporting_prob_min,
+        "reporting_prob_max": reporting_prob_max,
+        "multi_wave": multi_wave,
+        "random_seed": random_seed,
+        "vaccination_enabled": vaccination_enabled,
+        "daily_vaccination_rate": daily_vaccination_rate,
+        "incubation_period": incubation_period,
+        "waves": waves,
+        "testing_rate": testing_rate,
+        "mask_decay_rate": mask_decay_rate,
+        "travel_enabled": travel_enabled,
+        "travel_max": travel_max,
+        "mode": "interactive"
+    }
+    return params
+
+
+# =========================================================
+# RANDOM PARAM GENERATOR
+# =========================================================
+def generate_random_inputs(batch_fixed=None):
+    """
+    Generate a random but realistic parameter config.
+    Returns:
+        dict of parameters
+    """
+    population = random.randint(10_000, 1_000_000)
+    if batch_fixed is None:
+        days = random.randint(90, 365)
+        max_init = max(1, min(population // 20, 5000))
+        initial_infected = random.randint(10, max_init)
+
+        mask_score = random.randint(1, 10)
+        crowdedness_score = random.randint(1, 10)
+
+        quarantine_enabled = random.choice(["y", "n"])
+        seasonality_enabled = random.choice(["y", "n"])
+        interventions_enabled = random.choice(["y", "n"])
+        multi_wave = random.choice(["y", "n"])
+
+        vaccination_enabled = random.choice(["y", "n"])
+        daily_vaccination_rate = round(random.uniform(0.0, 0.02), 3)  # up to 2% per day
+        incubation_period = random.randint(2, 7)
+        testing_rate = random.choice(["low", "medium", "high"])
+        mask_decay_rate = round(random.uniform(0.005, 0.02), 4)
+
+        travel_enabled = random.choice(["y", "n"])
+        travel_max = random.randint(1, 10) if yn_to_bool(travel_enabled) else 0
+
+        low = round(random.uniform(0.3, 0.6), 2)
+        high = round(random.uniform(low + 0.1, 0.95), 2)
+
+        random_seed = random.randint(1, 999999)
+
+        # Unified variant/multi-wave
+        num_waves = random.randint(1, 2)
+        waves = []
+        for i in range(num_waves):
+            wave_day = random.randint(30 + i*30, 120 + i*30)
+            wave_beta = round(random.uniform(1.2, 2.5), 2)
+            wave_seed = random.randint(20, 100)
+            waves.append({"day": wave_day, "beta": wave_beta, "seed": wave_seed})
+    else:
+        days = batch_fixed.get('days') if batch_fixed.get('days') is not None else random.randint(90, 365)
+        max_init = max(1, min(population // 20, 5000))
+        initial_infected = random.randint(10, max_init)
+
+        mask_score = batch_fixed.get('mask_score') if batch_fixed.get('mask_score') is not None else random.randint(1, 10)
+        crowdedness_score = random.randint(1, 10)
+
+        quarantine_enabled = random.choice(["y", "n"])
+        seasonality_enabled = random.choice(["y", "n"])
+        interventions_enabled = random.choice(["y", "n"])
+        multi_wave = random.choice(["y", "n"])
+
+        vaccination_enabled = random.choice(["y", "n"])
+        daily_vaccination_rate = round(random.uniform(0.0, 0.02), 3)  # up to 2% per day
+        incubation_period = random.randint(2, 7)
+        testing_rate = random.choice(["low", "medium", "high"])
+        mask_decay_rate = round(random.uniform(0.005, 0.02), 4)
+
+        travel_enabled = random.choice(["y", "n"])
+        travel_max = random.randint(1, 10) if yn_to_bool(travel_enabled) else 0
+
+        low = round(random.uniform(0.3, 0.6), 2)
+        high = round(random.uniform(low + 0.1, 0.95), 2)
+
+        random_seed = random.randint(1, 999999)
+
+        # Unified variant/multi-wave
+        num_waves = batch_fixed.get('multi_wave_count') if batch_fixed.get('multi_wave_count') is not None else random.randint(1, 2)
+        wave_days = [int(x) for x in batch_fixed.get('wave_days', '').split(',')] if batch_fixed.get('wave_days') else [60 + i*30 for i in range(num_waves)]
+        wave_betas = [float(x) for x in batch_fixed.get('wave_betas', '').split(',')] if batch_fixed.get('wave_betas') else [2.5]*num_waves
+        wave_seeds = [int(x) for x in batch_fixed.get('wave_seeds', '').split(',')] if batch_fixed.get('wave_seeds') else [100]*num_waves
+        waves = []
+        for i in range(num_waves):
+            waves.append({
+                'day': wave_days[i] if i < len(wave_days) else 60 + i*30,
+                'beta': wave_betas[i] if i < len(wave_betas) else 2.5,
+                'seed': wave_seeds[i] if i < len(wave_seeds) else 100
+            })
+
+    params = {
+        "population": population,
+        "days": days,
+        "initial_infected": initial_infected,
+        "mask_score": mask_score,
+        "crowdedness_score": crowdedness_score,
+        "quarantine_enabled": quarantine_enabled,
+        "seasonality_enabled": seasonality_enabled,
+        "interventions_enabled": interventions_enabled,
+        "reporting_prob_min": low,
+        "reporting_prob_max": high,
+        "multi_wave": multi_wave,
+        "random_seed": random_seed,
+        "vaccination_enabled": vaccination_enabled,
+        "daily_vaccination_rate": daily_vaccination_rate,
+        "incubation_period": incubation_period,
+        "waves": waves,
+        "testing_rate": testing_rate,
+        "mask_decay_rate": mask_decay_rate,
+        "travel_enabled": travel_enabled,
+        "travel_max": travel_max,
+        "mode": "random"
+    }
+    return params
+
+
+# =========================================================
+# SIMULATOR
+# =========================================================
+def simulate_epidemic(params, use_sir=False):
+    """
+    Run stochastic epidemic simulation using modified SIR dynamics.
+
+    Beta pipeline:
+        beta_base -> behavior (mask, crowd) -> seasonality -> intervention -> multi-wave -> jitter -> center envelope -> sustain rule
+
+    Quarantine reduces the effective infectious pool.
+
+    Returns:
+        pd.DataFrame with agreed column schema.
+    """
+    # RNG
+    seed = params["random_seed"]
+    rng = np.random.default_rng(seed)
+
+    # Unpack
+    N = params["population"]
+    days = params["days"]
+    S = N - params["initial_infected"]
+    I = params["initial_infected"]
+    R = 0
+
+    # Base beta
+    beta_base = 0.3
+
+    # Flags
+    seasonality = yn_to_bool(params["seasonality_enabled"])
+    quarantine = yn_to_bool(params["quarantine_enabled"])
+    interventions = yn_to_bool(params["interventions_enabled"])
+    multi_wave = yn_to_bool(params["multi_wave"])
+
+    # Reporting schedule + jitter
+    p_min, p_max = params["reporting_prob_min"], params["reporting_prob_max"]
+    base_report_probs = np.linspace(p_min, p_max, days)
+
+    # Intervention window(auto)
+    if interventions:
+        int_start = days // 3
+        int_end = int_start + INT_DURATION
+    else:
+        int_start = int_end = -1  # never triggers
+
+    # Multi-wave bump
+    if multi_wave:
+        wave_start = days // 2
+        wave_end = wave_start + MULTIWAVE_DURATION
+    else:
+        wave_start = wave_end = -1
+
+    # Central Gaussian envelope to push peak toward middle
+    center_mu = days / 2
+    center_sigma = days * CENTER_SIGMA_FRAC  # convert fraction to days
+
+    # Random dropper scheduler
+    next_drop_day = rng.integers(DROP_MIN_INTERVAL, DROP_MAX_INTERVAL + 1)
+
+    # Unpack new params
+    vaccination = yn_to_bool(params.get("vaccination_enabled", "n"))
+    daily_vaccination_rate = params.get("daily_vaccination_rate", 0.0)
+    incubation_period = params.get("incubation_period", INCUBATION_PERIOD_DEFAULT)
+    testing_rate = params.get("testing_rate", "medium")
+    mask_decay_rate = params.get("mask_decay_rate", MASK_DECAY_RATE_DEFAULT)
+    travel = yn_to_bool(params.get("travel_enabled", "n"))
+    travel_max = params.get("travel_max", 0)
+    waves = params.get("waves", [])
+    mask_score = params.get("mask_score", 4)
+    crowdedness_score = params.get("crowdedness_score", 6)
+
+    # SEIR compartments
+    E = 0
+    I = params["initial_infected"]
+    R = 0
+    E_queue = [0] * incubation_period  # queue for exposed individuals
+
+    # Storage
+    rows = []
+    beta_rw = 0.0  # random walk component for beta
+    gamma_rw = 0.0  # random walk component for gamma
+    for t in range(days):
+        # --- Realistic beta build-up ---
+        # Mask effect (0–50% reduction)
+        mask_effect = 1 - 0.05 * mask_score
+        # Crowding effect (0–45% increase)
+        crowd_effect = 1 + 0.05 * (crowdedness_score - 1)
+        # Base beta
+        beta_t = beta_base * mask_effect * crowd_effect
+        # Seasonality
+        if seasonality:
+            beta_t *= 1 + 0.2 * np.sin(2 * np.pi * t / SEASONAL_PERIOD)
+        # Intervention
+        if int_start <= t <= int_end:
+            beta_t *= 0.5
+        # Multi-wave/variant
+        beta_multiplier = 1.0
+        for wave in waves:
+            if wave["day"] <= t < wave["day"] + VARIANT_WAVE_DURATION:
+                beta_multiplier *= wave["beta"]
+        beta_t *= beta_multiplier
+        # Daily jitter (10%)
+        beta_t *= (1 + rng.normal(0, 0.10))
+        # Add slow random walk to beta (stronger)
+        beta_rw += rng.normal(0, 0.02)
+        beta_rw = np.clip(beta_rw, -0.3, 0.3)
+        beta_t *= (1 + beta_rw)
+
+        # Quarantine effect (50% reduction)
+        if quarantine:
+            eff_I = I * 0.5
+            q_frac = 0.5
+        else:
+            eff_I = I
+            q_frac = 0.0
+
+        # Minimum infection floor: if I is very low and S is available, seed a few new infections
+        if I < 5 and S > 10:
+            new_seed = min(20, S)
+            S -= new_seed
+            E += new_seed
+
+        # Vaccination (90% efficacy)
+        if vaccination and S > 0:
+            vaccinated_today = min(S, int(S * daily_vaccination_rate))
+            effective_vaccinated = int(vaccinated_today * 0.9)
+            S -= effective_vaccinated
+            R += effective_vaccinated
+            # 10% remain susceptible (breakthroughs)
+
+        # Travel importation: add travel_max new exposed from outside
+        if travel and travel_max > 0:
+            new_travelers = travel_max
+            E += new_travelers
+            E_queue[-1] += new_travelers
+
+        # Inject new exposed for each wave on its start day
+        for wave in waves:
+            if t == wave["day"] and S > 0:
+                new_wave_cases = min(wave["seed"], S)
+                S -= new_wave_cases
+                E += new_wave_cases
+                E_queue[-1] += new_wave_cases
+
+        # Apply all active waves (variants): boost beta for duration
+        beta_multiplier = 1.0
+        for wave in waves:
+            if wave["day"] <= t < wave["day"] + VARIANT_WAVE_DURATION:
+                beta_multiplier *= wave["beta"]
+        beta_t *= beta_multiplier
+
+        # Transmission & recovery probabilities
+        p_inf = 1.0 - np.exp(-beta_t * eff_I / N)
+        p_inf = np.clip(p_inf, 0, 1)
+
+        # Gamma (recovery rate) with random walk and daily jitter (stronger)
+        gamma_t = GAMMA * (1 + gamma_rw + rng.normal(0, 0.10))  # 10% daily jitter
+        gamma_rw += rng.normal(0, 0.01)
+        gamma_rw = np.clip(gamma_rw, -0.15, 0.15)
+        p_rec = 1.0 - np.exp(-gamma_t)
+        p_rec = np.clip(p_rec, 0, 1)
+
+        # Robust minimum infected floor: every 3 days, if both I and E are zero and S > 10, seed 15–30 new infections (split E/I)
+        if t > 0 and t % 3 == 0 and I + E == 0 and S > 10:
+            new_seed = min(rng.integers(15, 31), S)
+            S -= new_seed
+            e_seed = new_seed // 2
+            i_seed = new_seed - e_seed
+            E += e_seed
+            I += i_seed
+            E_queue[-1] += e_seed
+
+        # New transitions (stochastic)
+        new_exp = rng.binomial(S, p_inf) if S > 0 else 0
+        S -= new_exp
+        E_queue.append(new_exp)
+        new_inf = E_queue.pop(0)
+        # E->I floor: always if E > 0
+        if new_inf == 0 and E > 0:
+            new_inf = 1
+            E -= 1
+        E += new_exp - new_inf
+        new_rec = rng.binomial(I, p_rec) if I > 0 else 0
+        I += new_inf - new_rec
+        R += new_rec
+
+        # Random dropper: at random intervals, add random number of new exposed
+        if t == next_drop_day:
+            new_cases = rng.integers(DROP_MIN_CASES, DROP_MAX_CASES + 1)
+            E += new_cases
+            E_queue[-1] += new_cases
+            # Schedule next drop
+            next_drop_day += rng.integers(DROP_MIN_INTERVAL, DROP_MAX_INTERVAL + 1)
+
+        # Testing intensity affects reporting probability and lag
+        if testing_rate == "low":
+            report_p = max(base_report_probs[t] * 0.7, 0.01)
+            report_lag = 2
+        elif testing_rate == "high":
+            report_p = min(base_report_probs[t] * 1.2, 0.99)
+            report_lag = 0
+        else:
+            report_p = base_report_probs[t]
+            report_lag = 1
+        # Reporting lag: shift reported cases by lag days
+        if t >= report_lag:
+            reported_cases = rng.binomial(new_inf, report_p) if new_inf > 0 else 0
+        else:
+            reported_cases = 0
+
+        # Set output flags for DataFrame
+        season_index = 1.0
+        if seasonality:
+            season_index = 1 + 0.2 * np.sin(2 * np.pi * t / SEASONAL_PERIOD)
+        int_flag = 1 if int_start <= t <= int_end else 0
+        wave_flag = 0
+        for wave in waves:
+            if wave["day"] <= t < wave["day"] + VARIANT_WAVE_DURATION:
+                wave_flag = 1
+                break
+
+        # Effective reproduction number Rt
+        Rt = (beta_t / GAMMA) * (S / N) if N > 0 else 0
+
+        # Store
+        rows.append([
+            t, S, E, I, R, new_exp, new_inf, new_rec, reported_cases,
+            beta_t, season_index, int_flag, q_frac, report_p, wave_flag, Rt
+        ])
+
+    df = pd.DataFrame(rows, columns=[
+        "Day", "Susceptible", "Exposed", "Infected", "Recovered",
+        "New_Exposed", "New_Infections", "New_Recoveries", "Reported_Cases",
+        "Beta_Effective", "Season_Index", "Intervention_Flag",
+        "Quarantine_Fraction", "Reporting_Prob", "MultiWave_Flag", "Rt"
+    ])
+    return df
+
+
+# =========================================================
+# PLOTTING
+# =========================================================
+def plot_sir(df, path):
+    ensure_dir(os.path.dirname(path))
+    plt.figure(figsize=(10, 6))
+    plt.stackplot(df["Day"],  df["Infected"], df["Exposed"], df["Susceptible"],  df["Recovered"],
+                  labels=["Infected","Exposed", "Susceptible",  "Recovered"],
+                  colors=["#ff6961",  "#fdfd96","#77b5fe", "#77dd77"])
+    plt.legend(loc="upper right")
+    plt.title("Epidemic Simulation (SEIR Compartments)")
+    plt.xlabel("Day")
+    plt.ylabel("Population")
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def plot_reported(df, path):
+    ensure_dir(os.path.dirname(path))
+    plt.figure(figsize=(10, 5))
+    plt.plot(df["Day"], df["Reported_Cases"], label="Reported Cases", color="orange")
+    plt.title("Reported Cases Over Time")
+    plt.xlabel("Day")
+    plt.ylabel("Cases")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+# =========================================================
+# OUTPUTS
+# =========================================================
+def save_outputs(df, params, out_dir, save_plots=True):
+    ensure_dir(out_dir)
+    csv_path = os.path.join(out_dir, "dataset.csv")
+    json_path = os.path.join(out_dir, "params.json")
+    sir_plot = os.path.join(out_dir, "stacked_sir.png")
+    reported_plot = os.path.join(out_dir, "reported_cases.png")
+
+    df.to_csv(csv_path, index=False)
+    with open(json_path, "w") as f:
+        json.dump(params, f, indent=4)
+
+    if save_plots:
+        plot_sir(df, sir_plot)
+        plot_reported(df, reported_plot)
+        print(f"  Plots: {sir_plot}, {reported_plot}")
+
+    print(f"\nData and plots saved in: {out_dir}")
+    print(f"  CSV  -> {csv_path}")
+    print(f"  JSON -> {json_path}")
+
+
+# =========================================================
+# MAIN
+# =========================================================
+def main():
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument('mode', nargs='?', default=None)
+    parser.add_argument('count', nargs='?', type=int, default=5)
+    parser.add_argument('--sir', action='store_true', help='Use SIR model instead of SEIR')
+    parser.add_argument('--plots', dest='save_plots', action='store_true', help='Save plots (default)')
+    parser.add_argument('--no-plots', dest='save_plots', action='store_false', help='Do not save plots')
+    parser.add_argument('--help', action='store_true', help='Show help message and exit')
+    # Batch fixed params
+    parser.add_argument('--days', type=int, help='Number of days for each dataset in batch')
+    parser.add_argument('--mask_score', type=int, help='Mask adherence 1-10')
+    parser.add_argument('--multi_wave_count', type=int, help='Number of multi-waves/variants')
+    parser.add_argument('--wave_days', type=str, help='Comma-separated days for each wave (e.g. 60,100)')
+    parser.add_argument('--wave_betas', type=str, help='Comma-separated beta multipliers for each wave (e.g. 2.5,2.0)')
+    parser.add_argument('--wave_seeds', type=str, help='Comma-separated seeds for each wave (e.g. 100,80)')
+    parser.set_defaults(save_plots=True)
+    args, unknown = parser.parse_known_args()
+
+    if args.help:
+        print_help()
+        return
+
+    # Mode selection
+    if args.mode == 'interact':
+        params = get_user_inputs()
+        df = simulate_epidemic(params, use_sir=args.sir)
+        out_dir = os.path.join(BASE_SAVE_DIR, f"run_{ts()}")
+        save_outputs(df, params, out_dir, save_plots=args.save_plots)
+    elif args.mode == 'batch':
+        count = args.count
+        batch_fixed = {
+            'days': args.days,
+            'mask_score': args.mask_score,
+            'multi_wave_count': args.multi_wave_count,
+            'wave_days': args.wave_days,
+            'wave_betas': args.wave_betas,
+            'wave_seeds': args.wave_seeds
+        }
+        generate_batch(count, use_sir=args.sir, save_plots=args.save_plots, batch_fixed=batch_fixed)
+    elif args.mode is None:
+        params = generate_random_inputs()
+        df = simulate_epidemic(params, use_sir=args.sir)
+        out_dir = os.path.join(BASE_SAVE_DIR, f"run_{ts()}")
+        save_outputs(df, params, out_dir, save_plots=args.save_plots)
+    else:
+        print("Unknown mode! Use: 'interact', 'batch <count>', or --help.")
+
+
+def print_help():
+    print("""
+Epidemic Dataset Generator CLI Usage:
+
+python BIGBOY1.1.py [mode] [options]
+
+Modes:
+  interact           Interactive mode (prompts for parameters)
+  batch [N]          Generate a batch of N random datasets (default N=5)
+
+Options:
+  --sir              Use SIR model instead of SEIR (default: SEIR)
+  --plots            Save plots (default: enabled)
+  --no-plots         Do not save plots
+  --help             Show this help message and exit
+
+Examples:
+  python BIGBOY1.1.py interact
+  python BIGBOY1.1.py batch 10 --sir --no-plots
+  python BIGBOY1.1.py --help
+""")
+
+
+def generate_batch(count=5, use_sir=False, save_plots=True, batch_fixed=None):
+    batch_id = ts()
+    base_batch_dir = os.path.join(BASE_SAVE_DIR, f"batch_{batch_id}")
+    ensure_dir(base_batch_dir)
+
+    print(f"\n=== BATCH GENERATION: {count} datasets ===")
+    for i in range(1, count + 1):
+        params = generate_random_inputs(batch_fixed=batch_fixed)
+        df = simulate_epidemic(params, use_sir=use_sir)
+        run_dir = os.path.join(base_batch_dir, f"run_{i:03d}")
+        ensure_dir(run_dir)
+        csv_path = os.path.join(run_dir, "dataset.csv")
+        json_path = os.path.join(run_dir, "params.json")
+        df.to_csv(csv_path, index=False)
+        with open(json_path, "w") as f:
+            json.dump(params, f, indent=4)
+        if save_plots:
+            sir_plot = os.path.join(run_dir, "stacked_sir.png")
+            reported_plot = os.path.join(run_dir, "reported_cases.png")
+            plot_sir(df, sir_plot)
+            plot_reported(df, reported_plot)
+        print(f"  Dataset {i}/{count} -> {csv_path}")
+    print(f"\nAll datasets saved in: {base_batch_dir}")
+
+if __name__ == "__main__":
+    main()
+
+
+
+================================================
+FILE: Conc/BIGBOY1.py
+================================================
+"""
+Epidemic Dataset Generator
+
+Two modes:
+    1) Random auto mode (default): python epidemic_generator.py
+    2) Interactive mode:          python epidemic_generator.py interact
+
+Generates a stochastic SIR-style epidemic with:
+- Mask & crowdedness behavior modifying beta
+- Quarantine reducing infectious pool
+- Seasonality (optional)
+- Intervention (optional; fixed window)
+- Multi-wave (optional; late beta boost)
+- Central-peaked epidemic envelope (Gaussian)
+- Random dropper: irregular case drops (simulate reporting/behavior shocks)
+- Reporting probability ramp + day-to-day jitter
+- Outputs dataset.csv, params.json, and plots in timestamped run folder
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import json
+import os
+import sys
+import random
+from datetime import datetime
+
+# =========================================================
+# GLOBAL CONFIG
+# =========================================================
+BASE_SAVE_DIR = r"C:\Users\rishu narwal\Desktop\SVM_FDE\datasets"
+
+# Behavioral beta scaling caps
+MASK_MAX_REDUCTION = 0.6       # mask_score=10 -> -60% beta
+CROWD_MAX_INCREASE = 0.7       # crowd_score=10 -> +70% beta
+
+# Seasonality defaults
+SEASONAL_AMP = 0.25            # +/- 25%
+SEASONAL_PERIOD = 60           # 60-day cycle
+
+# Quarantine
+QUARANTINE_FRACTION = 0.5      # 50% of infected effectively isolated if enabled
+
+# Recovery rate (gamma)
+GAMMA = 0.08                   # slower recovery than before -> longer epidemic
+
+# Central peak envelope (Gaussian)
+CENTER_AMP = 0.5               # up to +50% beta at mid-epidemic
+CENTER_SIGMA_FRAC = 0.2        # width = fraction of total days (std dev)
+
+# Multi-wave second bump (multiplicative)
+MULTIWAVE_BETA_MULT = 1.5      # 50% beta increase during second wave
+MULTIWAVE_DURATION = 20        # days
+
+# Intervention window (if enabled)
+INT_DURATION = 14              # days
+INT_MULTIPLIER = 0.4           # 60% beta reduction
+
+# Reporting jitter
+REPORT_SIGMA_ABS = 0.05        # absolute +/- noise to reporting prob
+REPORT_CLIP_MIN = 0.0
+REPORT_CLIP_MAX = 0.99
+
+# Random dropper
+DROP_MIN_INTERVAL = 15         # min days between drops
+DROP_MAX_INTERVAL = 20         # max days between drops
+DROP_MIN_CASES = 1
+DROP_MAX_CASES = 100
+
+# Matplotlib non-interactive backend safety (in case)
+plt.switch_backend("Agg")
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+def ts():
+    return datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
+
+
+def yn_to_bool(v: str) -> bool:
+    return str(v).strip().lower() in ("y", "yes", "true", "1")
+
+
+# =========================================================
+# INTERACTIVE INPUTS
+# =========================================================
+def get_user_inputs():
+    """
+    Collect user inputs interactively with defaults and validation.
+    Returns:
+        dict of parameters (strings/ints/floats/flags)
+    """
+    print("\n=== INTERACTIVE MODE ===")
+
+    # population
+    pop = input("Population [73500]: ").strip()
+    population = int(pop) if pop else 73500
+    if population > 1_000_000:
+        print("Population capped at 1,000,000.")
+        population = 1_000_000
+    if population < 1000:
+        print("Population too low; forcing 1000.")
+        population = 1000
+
+    # days
+    d = input("Number of days [180]: ").strip()
+    days = int(d) if d else 180
+    if days < 30:
+        print("Days too low; forcing 30.")
+        days = 30
+
+    # initial infected
+    ii = input("Initial infected [50]: ").strip()
+    initial_infected = int(ii) if ii else 50
+    max_init = max(1, min(population // 20, 5000))  # <=5% of pop, cap 5000
+    if initial_infected > max_init:
+        print(f"Initial infected capped at {max_init}.")
+        initial_infected = max_init
+    if initial_infected < 1:
+        initial_infected = 1
+
+    # mask and crowd
+    ms = input("Mask adherence 1-10 [4]: ").strip()
+    mask_score = int(ms) if ms else 4
+    mask_score = min(max(mask_score, 1), 10)
+
+    cs = input("Crowdedness 1-10 [6]: ").strip()
+    crowdedness_score = int(cs) if cs else 6
+    crowdedness_score = min(max(crowdedness_score, 1), 10)
+
+    # feature flags
+    quarantine_enabled = input("Enable quarantine (y/n) [y]: ").strip() or "y"
+    seasonality_enabled = input("Enable seasonality (y/n) [y]: ").strip() or "y"
+    interventions_enabled = input("Enable interventions (y/n) [y]: ").strip() or "y"
+    multi_wave = input("Enable multi-wave (y/n) [n]: ").strip() or "n"
+
+    # reporting range
+    rpmin = input("Reporting probability min [0.6]: ").strip()
+    reporting_prob_min = float(rpmin) if rpmin else 0.6
+    rpmax = input("Reporting probability max [0.85]: ").strip()
+    reporting_prob_max = float(rpmax) if rpmax else 0.85
+    if reporting_prob_max <= reporting_prob_min:
+        print("Max must be > min; adjusting.")
+        reporting_prob_max = min(0.95, reporting_prob_min + 0.1)
+
+    # seed
+    seed_in = input("Random seed [auto]: ").strip()
+    random_seed = None if not seed_in or seed_in.lower() == "auto" else int(seed_in)
+
+    params = {
+        "population": population,
+        "days": days,
+        "initial_infected": initial_infected,
+        "mask_score": mask_score,
+        "crowdedness_score": crowdedness_score,
+        "quarantine_enabled": quarantine_enabled,
+        "seasonality_enabled": seasonality_enabled,
+        "interventions_enabled": interventions_enabled,
+        "reporting_prob_min": reporting_prob_min,
+        "reporting_prob_max": reporting_prob_max,
+        "multi_wave": multi_wave,
+        "random_seed": random_seed,
+        "mode": "interactive"
+    }
+    return params
+
+
+# =========================================================
+# RANDOM PARAM GENERATOR
+# =========================================================
+def generate_random_inputs():
+    """
+    Generate a random but realistic parameter config.
+    Returns:
+        dict of parameters
+    """
+    population = random.randint(10_000, 1_000_000)
+    days = random.randint(90, 365)
+    max_init = max(1, min(population // 20, 5000))
+    initial_infected = random.randint(10, max_init)
+
+    mask_score = random.randint(1, 10)
+    crowdedness_score = random.randint(1, 10)
+
+    quarantine_enabled = random.choice(["y", "n"])
+    seasonality_enabled = random.choice(["y", "n"])
+    interventions_enabled = random.choice(["y", "n"])
+    multi_wave = random.choice(["y", "n"])
+
+    low = round(random.uniform(0.3, 0.6), 2)
+    high = round(random.uniform(low + 0.1, 0.95), 2)
+
+    random_seed = random.randint(1, 999999)
+
+    params = {
+        "population": population,
+        "days": days,
+        "initial_infected": initial_infected,
+        "mask_score": mask_score,
+        "crowdedness_score": crowdedness_score,
+        "quarantine_enabled": quarantine_enabled,
+        "seasonality_enabled": seasonality_enabled,
+        "interventions_enabled": interventions_enabled,
+        "reporting_prob_min": low,
+        "reporting_prob_max": high,
+        "multi_wave": multi_wave,
+        "random_seed": random_seed,
+        "mode": "random"
+    }
+    return params
+
+
+# =========================================================
+# SIMULATOR
+# =========================================================
+def simulate_epidemic(params):
+    """
+    Run stochastic epidemic simulation using modified SIR dynamics.
+
+    Beta pipeline:
+        beta_base -> behavior (mask, crowd) -> seasonality -> intervention -> multi-wave -> jitter -> center envelope -> sustain rule
+
+    Quarantine reduces the effective infectious pool.
+
+    Returns:
+        pd.DataFrame with agreed column schema.
+    """
+    # RNG
+    seed = params["random_seed"]
+    rng = np.random.default_rng(seed)
+
+    # Unpack
+    N = params["population"]
+    days = params["days"]
+    S = N - params["initial_infected"]
+    I = params["initial_infected"]
+    R = 0
+
+    # Base beta
+    beta_base = 0.3
+
+    # Behavior adjustment
+    mask_factor = params["mask_score"] / 10.0
+    crowd_factor = params["crowdedness_score"] / 10.0
+    beta_behaviour = beta_base * (1 - MASK_MAX_REDUCTION * mask_factor)
+    beta_behaviour *= (1 + CROWD_MAX_INCREASE * crowd_factor)
+
+    # Flags
+    seasonality = yn_to_bool(params["seasonality_enabled"])
+    quarantine = yn_to_bool(params["quarantine_enabled"])
+    interventions = yn_to_bool(params["interventions_enabled"])
+    multi_wave = yn_to_bool(params["multi_wave"])
+
+    # Reporting schedule + jitter
+    p_min, p_max = params["reporting_prob_min"], params["reporting_prob_max"]
+    base_report_probs = np.linspace(p_min, p_max, days)
+
+    # Intervention window(auto)
+    if interventions:
+        int_start = days // 3
+        int_end = int_start + INT_DURATION
+    else:
+        int_start = int_end = -1  # never triggers
+
+    # Multi-wave bump
+    if multi_wave:
+        wave_start = days // 2
+        wave_end = wave_start + MULTIWAVE_DURATION
+    else:
+        wave_start = wave_end = -1
+
+    # Central Gaussian envelope to push peak toward middle
+    center_mu = days / 2
+    center_sigma = days * CENTER_SIGMA_FRAC  # convert fraction to days
+
+    # Random dropper scheduler
+    next_drop_day = rng.integers(DROP_MIN_INTERVAL, DROP_MAX_INTERVAL + 1)
+
+    # Storage
+    rows = []
+    for t in range(days):
+        # --- Beta build-up ---
+        beta_t = beta_behaviour
+
+        # Seasonality
+        if seasonality:
+            season_index = 1 + SEASONAL_AMP * np.sin(2 * np.pi * t / SEASONAL_PERIOD)
+            beta_t *= season_index
+        else:
+            season_index = 1.0
+
+        # Intervention
+        if int_start <= t <= int_end:
+            beta_t *= INT_MULTIPLIER
+            int_flag = 1
+        else:
+            int_flag = 0
+
+        # Multiwave
+        if wave_start <= t <= wave_end:
+            beta_t *= MULTIWAVE_BETA_MULT
+            wave_flag = 1
+        else:
+            wave_flag = 0
+
+        # Daily jitter around 0 mean (mild, 5% stdev proportional)
+        beta_t *= (1 + rng.normal(0, 0.05))
+
+        # Center peak envelope (Gaussian)
+        # (1 + CENTER_AMP*exp(...)) ensures mid-curve boosting
+        center_scale = 1 + CENTER_AMP * np.exp(-0.5 * ((t - center_mu) / center_sigma) ** 2)
+        beta_t *= center_scale
+
+        # Sustain if epidemic collapses too early
+        # If infections fall below very low value after first third, gently boost
+        if I < max(5, 0.001 * N) and t > days // 3:
+            beta_t *= 1.2
+
+        # Quarantine effect
+        if quarantine:
+            eff_I = I * (1 - QUARANTINE_FRACTION)
+            q_frac = QUARANTINE_FRACTION
+        else:
+            eff_I = I
+            q_frac = 0.0
+
+        # Transmission & recovery probabilities
+        p_inf = 1.0 - np.exp(-beta_t * eff_I / N)
+        p_inf = np.clip(p_inf, 0, 1)
+        p_rec = 1.0 - np.exp(-GAMMA)
+        p_rec = np.clip(p_rec, 0, 1)
+
+        # New transitions (stochastic)
+        new_inf = rng.binomial(S, p_inf) if S > 0 else 0
+        new_rec = rng.binomial(I, p_rec) if I > 0 else 0
+
+        # Apply compartment updates
+        S -= new_inf
+        I += new_inf - new_rec
+        R += new_rec
+
+        # Random dropper event?
+        if t == next_drop_day and I > 0:
+            drop_cases = rng.integers(DROP_MIN_CASES, min(DROP_MAX_CASES, I) + 1)
+            I -= drop_cases
+            R += drop_cases
+            # schedule next drop
+            next_drop_day += rng.integers(DROP_MIN_INTERVAL, DROP_MAX_INTERVAL + 1)
+
+        # Reporting jitter
+        base_p = base_report_probs[t]
+        report_p = base_p + rng.normal(0, REPORT_SIGMA_ABS)
+        report_p = float(np.clip(report_p, REPORT_CLIP_MIN, REPORT_CLIP_MAX))
+
+        # Observed cases (under-reporting)
+        reported_cases = rng.binomial(new_inf, report_p) if new_inf > 0 else 0
+
+        # Store
+        rows.append([
+            t, S, I, R, new_inf, new_rec, reported_cases,
+            beta_t, season_index, int_flag, q_frac, report_p, wave_flag
+        ])
+
+    df = pd.DataFrame(rows, columns=[
+        "Day", "Susceptible", "Infected", "Recovered",
+        "New_Infections", "New_Recoveries", "Reported_Cases",
+        "Beta_Effective", "Season_Index", "Intervention_Flag",
+        "Quarantine_Fraction", "Reporting_Prob", "MultiWave_Flag"
+    ])
+    return df
+
+
+# =========================================================
+# PLOTTING
+# =========================================================
+def plot_sir(df, path):
+    ensure_dir(os.path.dirname(path))
+    plt.figure(figsize=(10, 6))
+    plt.stackplot(df["Day"],  df["Infected"], df["Susceptible"],df["Recovered"],
+                  labels=[ "Infected","Susceptible", "Recovered"],
+                  colors=[ "#ff6961","#77b5fe", "#77dd77"])
+    plt.legend(loc="upper right")
+    plt.title("Epidemic Simulation (SIR Compartments)")
+    plt.xlabel("Day")
+    plt.ylabel("Population")
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+def plot_reported(df, path):
+    ensure_dir(os.path.dirname(path))
+    plt.figure(figsize=(10, 5))
+    plt.plot(df["Day"], df["Reported_Cases"], label="Reported Cases", color="orange")
+    plt.title("Reported Cases Over Time")
+    plt.xlabel("Day")
+    plt.ylabel("Cases")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path)
+    plt.close()
+
+
+# =========================================================
+# OUTPUTS
+# =========================================================
+def save_outputs(df, params, out_dir):
+    ensure_dir(out_dir)
+    csv_path = os.path.join(out_dir, "dataset.csv")
+    json_path = os.path.join(out_dir, "params.json")
+    sir_plot = os.path.join(out_dir, "stacked_sir.png")
+    reported_plot = os.path.join(out_dir, "reported_cases.png")
+
+    df.to_csv(csv_path, index=False)
+    with open(json_path, "w") as f:
+        json.dump(params, f, indent=4)
+
+    plot_sir(df, sir_plot)
+    plot_reported(df, reported_plot)
+
+    print(f"\nData and plots saved in: {out_dir}")
+    print(f"  CSV  -> {csv_path}")
+    print(f"  JSON -> {json_path}")
+    print(f"  Plots: {sir_plot}, {reported_plot}")
+
+
+# =========================================================
+# MAIN
+# =========================================================
+def main():
+    # Mode selection
+    if len(sys.argv) > 1 and sys.argv[1].lower() == "interact":
+        params = get_user_inputs()
+    else:
+        params = generate_random_inputs()
+
+    # Show params
+    print("\n=== PARAMETERS ===")
+    print(json.dumps(params, indent=4))
+
+    # Run simulation
+    df = simulate_epidemic(params)
+
+    # Save
+    run_id = ts()
+    out_dir = os.path.join(BASE_SAVE_DIR, f"run_{run_id}")
+    save_outputs(df, params, out_dir)
+
+    print("\nGeneration complete!")
+def generate_batch(count=5):
+    """
+    Generate 'count' random epidemic datasets without plots.
+    Datasets are stored in a timestamped batch folder.
+    """
+    batch_id = ts()
+    base_batch_dir = os.path.join(BASE_SAVE_DIR, f"batch_{batch_id}")
+    ensure_dir(base_batch_dir)
+
+    print(f"\n=== BATCH GENERATION: {count} datasets ===")
+    for i in range(1, count + 1):
+        params = generate_random_inputs()
+        df = simulate_epidemic(params)
+
+        run_dir = os.path.join(base_batch_dir, f"run_{i:03d}")
+        ensure_dir(run_dir)
+
+        csv_path = os.path.join(run_dir, "dataset.csv")
+        json_path = os.path.join(run_dir, "params.json")
+
+        df.to_csv(csv_path, index=False)
+        with open(json_path, "w") as f:
+            json.dump(params, f, indent=4)
+
+        print(f"  Dataset {i}/{count} -> {csv_path}")
+
+    print(f"\nAll datasets saved in: {base_batch_dir}")
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        mode = sys.argv[1].lower()
+        if mode == "interact":
+            params = get_user_inputs()
+            df = simulate_epidemic(params)
+            out_dir = os.path.join(BASE_SAVE_DIR, f"run_{ts()}")
+            save_outputs(df, params, out_dir)
+        elif mode == "batch":
+            # Example: python BIGBOY1.py batch 10
+            count = int(sys.argv[2]) if len(sys.argv) > 2 else 5
+            generate_batch(count)
+        else:
+            print("Unknown mode! Use: 'interact' or 'batch <count>'.")
+    else:
+        params = generate_random_inputs()
+        df = simulate_epidemic(params)
+        out_dir = os.path.join(BASE_SAVE_DIR, f"run_{ts()}")
+        save_outputs(df, params, out_dir)
+
+
