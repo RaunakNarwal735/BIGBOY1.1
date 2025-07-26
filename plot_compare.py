@@ -1,35 +1,4 @@
-"""
-Advanced plotting utilities for Epidemic Dataset Generator.
-
-This file is a **drop‑in replacement** for the plotting file you uploaded. It keeps
-the original `plot_sir()` and `plot_reported()` functions (so existing imports
-won't break) and adds all the new, more visual plots you requested:
-
-    • Compartment Heatmap (Day × S/E/I/R)
-    • New Exposed vs New Recoveries dual line
-    • Reported vs Actual Infections
-    • I & S Area + Reported overlay (scaled)
-    • Phase Diagram (I vs S, color by Day or Beta_Effective)
-    • 3D Day–Beta–Infected ribbon surface
-    • Streamgraph SEIR (centered “Theme River” style)
-    • Radial (polar) Seasonality + Infected overlay
-    • Beta vs Cases Scatter (colored by Day)
-
-All figures are saved at dpi=300. Seaborn is optional; the module falls back to a
-matplotlib style if Seaborn isn’t installed, so you will not crash.
-
-Usage example:
-
-    import pandas as pd
-    import advanced_plotting as ap
-
-    df = pd.read_csv("run.csv")
-    ap.plot_compartment_heatmap(df, "out/heatmap.png")
-    ap.plot_phase_diagram(df, "out/phase_beta.png", color_by="Beta_Effective")
-    ap.save_all_advanced_plots(df, "out/all_plots")
-
-"""
-
+#
 from __future__ import annotations
 
 import os
@@ -39,10 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 (registers 3D projection)
-
-# ------------------------------------------------------------------
-# Optional Seaborn styling (graceful fallback)
-# ------------------------------------------------------------------
+#
 try:  # try/except so missing seaborn never breaks plotting
     import seaborn as sns  # type: ignore
     _HAVE_SNS = True
@@ -52,11 +18,12 @@ except Exception:  # ImportError or runtime error
     _HAVE_SNS = False
     plt.style.use("seaborn-v0_8-darkgrid")  # built-in mpl style
 
-# If project defines BASE_SAVE_DIR we don’t actually need it here, but we'll try.
-try:  # soft import (unused but harmless)
-    from config import BASE_SAVE_DIR  # type: ignore  # noqa: F401
-except Exception:  # keep module importable if config missing
-    BASE_SAVE_DIR = "."
+
+DATASET_PATH = r"C:\Users\rishu narwal\Desktop\BIGBOY1.2\OUT_DIR\INDIA_20250726_162853\dataset.csv"
+OUT_DIR = r"C:\Users\rishu narwal\Desktop\BIGBOY1.2\OUT_DIR\INDIA_20250726_162853\plots"
+
+df = pd.read_csv(DATASET_PATH) 
+
 
 # ------------------------------------------------------------------
 # Utilities
@@ -520,8 +487,7 @@ def save_all_advanced_plots(df: pd.DataFrame, out_dir: str) -> None:
         plot_beta_vs_seasonality(df, os.path.join(out_dir, "streamgraph_seir.png"))
     except Exception:
         pass  # ignore if compartments missing
-
-
+save_all_advanced_plots(df, OUT_DIR)
 __all__ = [
     "plot_sir",
     "plot_reported",
