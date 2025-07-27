@@ -13,12 +13,12 @@ india_scaled = df['Reported_India'] * (df['Reported_Cases'].max() / df['Reported
 df['Reported_India_Scaled'] = india_scaled
 
 # Seaborn setup
-sns.set(style="darkgrid")
+sns.set(style="darkgrid", palette="muted")
 
 # Bilinear plot
 plt.figure(figsize=(12, 6))
-sns.lineplot(data=df, x='Day', y='Reported_Cases', label='Simulated (BIGBOY1.2)', marker='o')
-sns.lineplot(data=df, x='Day', y='Reported_India_Scaled', label='Reported India (Scaled)', marker='x')
+sns.lineplot(data=df, x='Day', y='Reported_Cases', label='Simulated (BIGBOY1.2)')
+sns.lineplot(data=df, x='Day', y='Reported_India_Scaled', label='Reported India (Scaled)')
 plt.title('Comparison of Synthetic vs Real Cases')
 plt.xlabel('Day')
 plt.ylabel('Reported Cases (Scaled)')
