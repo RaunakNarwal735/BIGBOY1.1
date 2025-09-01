@@ -10,9 +10,13 @@
 \usepackage{setspace}  
 \usepackage{parskip}   
 \usepackage{listings}
+\usepackage[table]{xcolor}
 \usepackage{tcolorbox}
+
+\usepackage{colortbl}
+\usepackage{array}
+\usepackage{caption}
 \tcbuselibrary{listings}
-\usepackage{xcolor}
 \usepackage[authoryear]{natbib}
 \definecolor{stringcolor}{rgb}{0.4,0.7,0.4}
 \definecolor{numbercolor}{rgb}{0.5,0.5,1}
@@ -33,8 +37,7 @@
 
 \usepackage{graphicx}
 \usepackage{float} 
-\usepackage{xcolor}
-\usepackage{tcolorbox}
+
 
 \usepackage{amsmath,amssymb,amsthm}
 
@@ -69,11 +72,7 @@
 \newcommand{\headertext}{}
 
 \newcommand{\shorttitle}{BIGBOY1.2}
-\documentclass{article}
-\usepackage[table]{xcolor}
-\usepackage{colortbl}
-\usepackage{array}
-\usepackage{caption}
+
 
 \definecolor{lightgray}{gray}{0.95} 
 \definecolor{midgray}{gray}{0.5} 
@@ -116,8 +115,7 @@ Indian Institute of Technology Mandi, Mandi, 175005, H.P., India}
 
 \begin{abstract}
 Modelling disease outbreak models remains challenging due to incomplete surveillance data, noise, and limited access to standardized datasets. We have created \textbf{BIGBOY1.2}, an open synthetic dataset generator that creates configurable epidemic time series and population-level trajectories suitable for benchmarking modelling, forecasting, and visualisation. The framework supports SEIR and SIR-like compartmental logic, custom seasonality, and noise injection to mimic real reporting artifacts. BIGBOY1.2 can produce datasets with diverse characteristics, making it suitable for comparing traditional epidemiological models (e.g., SIR, SEIR) with modern machine learning approaches (e.g., SVM, neural networks). \par
-\keywords{synthetic data; epidemiology; outbreak modelling; visual analytics; SEIR} \\
-AMS-class: 97P30, 92-11
+\keywords{synthetic data; epidemiology; outbreak modelling; visual analytics; SEIR, AMS-class: 97P30, 92-11} 
 \end{abstract}
 
 \section{Introduction}
@@ -366,7 +364,8 @@ It displays the reported cases across days; this contrasts the real-world observ
     \label{fig:seir-side-by-side}
 \end{figure}
 
-\subsection{3D plot of \text{day} \times $\beta$ \times \text{infection}}
+\subsection{3D plot of day $\times \beta \times$ infection}
+
 This 3D plot displays how contagious a disease is, as contingency and number of infections are not linear. The 3D visualization shows how small changes in $\beta$ can lead to explosive outbreaks under certain conditions. Lag effects can also be revealed by visualizing this 3D plot. Even if $\beta$ rises sharply, infections may spike a few days later; this helps in understanding incubation periods. \\
 If an intervention like mask adherence is applied (or lockdown) , it causes $\beta$ to drop and the flattening infection counts could be seen in the Z-axis. This shows causal evidence of policy effectiveness in time. In multiple wave simulations, the 3D plot clearly shows how subsequent waves differ in timing, strength and transmissibility. These could be compared early vs later variants of the disease visually. 
 \begin{figure}[H]

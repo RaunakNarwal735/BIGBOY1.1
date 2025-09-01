@@ -1,8 +1,8 @@
 @echo off
 :: Auto Git Commit and Push Script (Only if changes exist)
 
-:: Navigate to your project folder
-cd /d "C:\Users\rishu narwal\Desktop\BIGBOY1.2"
+:: Change directory to where the script itself is
+cd /d "%~dp0"
 
 :: Check for changes
 for /f %%i in ('git status --porcelain') do set changes=true
