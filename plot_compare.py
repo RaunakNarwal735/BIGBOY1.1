@@ -25,9 +25,6 @@ OUT_DIR = r"C:\Users\rishu narwal\Desktop\BIGBOY1.2\OUT_DIR\INDIA_20250726_16285
 df = pd.read_csv(DATASET_PATH) 
 
 
-# ------------------------------------------------------------------
-# Utilities
-# ------------------------------------------------------------------
 DEF_COMPARTMENTS = [ "Exposed", "Infected","Susceptible", "Recovered"]
 
 
@@ -44,7 +41,7 @@ def _get_colors(n: int, palette: str | None = "Set2"):
     """Return *n* distinct colors; use Seaborn palette if available."""
     if _HAVE_SNS and palette is not None:
         return sns.color_palette(palette, n)
-    # fallback color cycle (color‑blind friendly-ish)
+    
     base = [
         "#4e79a7", "#f28e2b", "#e15759", "#76b7b2", "#59a14f",
         "#edc948", "#b07aa1", "#ff9da7", "#9c755f", "#bab0ab",
@@ -93,7 +90,7 @@ def plot_reported(df: pd.DataFrame, path: str) -> None:
     fig.savefig(path, dpi=300)
     plt.close(fig)
 
-# 1. Heatmap: Day × Compartment (S/E/I/R)
+
 
 def plot_compartment_heatmap(
     df: pd.DataFrame,
@@ -103,21 +100,7 @@ def plot_compartment_heatmap(
     github_style: bool = True,
     bins: int = 5,
 ) -> None:
-    """GitHub‑style compartment heatmap.
-
-    By default (`github_style=True`), each compartment row is *independently* normalized
-    to its own max and rendered with a discrete color ramp (like the GitHub
-    contributions calendar). Each row uses a different Seaborn color family:
-
-        Susceptible → Blues
-        Exposed     → Oranges
-        Infected    → Reds
-        Recovered   → Greens
-
-    Set ``github_style=False`` to fall back to the original continuous ``viridis`` heatmap.
-    ``log_scale`` only applies in the non‑GitHub mode.
-    ``bins`` controls the number of discrete color steps (GitHub uses ~5).
-    """
+    
     ensure_dir(os.path.dirname(path))
 
     # Extract numeric values (rows=compartments, cols=time)
@@ -145,8 +128,7 @@ def plot_compartment_heatmap(
         plt.close(fig)
         return
 
-    # --- GitHub style ----------------------------------------------------
-    # Row-wise max for scaling; avoid divide-by-zero
+    
     row_max = values.max(axis=1, keepdims=True)
     row_max[row_max == 0] = 1.0
     scaled = values / row_max
@@ -156,7 +138,7 @@ def plot_compartment_heatmap(
     idx = np.digitize(scaled, edges, right=True)  # 0..bins
     idx[idx > bins] = bins
 
-    # Choose seaborn palettes per compartment (fallback generic grays)
+
     if _HAVE_SNS:
         pal_map = {
             'Susceptible': sns.color_palette("Blues", bins + 1),
@@ -258,11 +240,7 @@ def plot_reported_vs_actual_infections(
 # 4. Area Chart for I & S + Reported overlay
 
 def plot_is_area_with_reported(df: pd.DataFrame, path: str) -> None:
-    """Stacked area (Infected over Susceptible) + bold line for Reported_Cases.
-
-    Reported is scaled to the S+I axis range so it remains visible when counts
-    are in different units.
-    """
+   
     ensure_dir(os.path.dirname(path))
     fig, ax = plt.subplots(figsize=(12, 6))
     colors = _get_colors(2, palette="Set2")
@@ -319,17 +297,8 @@ def plot_phase_diagram_I_vs_R_beta(df: pd.DataFrame, path: str, color_by: str = 
 
 
 
-# ------------------------------------------------------------------
-# 6. 3D Surface: Day × Beta_Effective × Infected
-# ------------------------------------------------------------------
-
 def plot_3d_day_beta_infected(df: pd.DataFrame, path: str, surface: bool = True) -> None:
-    """3D visualization of Day, Beta_Effective, and Infected.
-
-    With a single time series we can’t create a full gridded surface; instead we
-    create a *ribbon* by duplicating the curve (trisurf) for a cool look. Set
-    `surface=False` to draw only the 3D line.
-    """
+    
     ensure_dir(os.path.dirname(path))
     day = _maybe_numpy(df["Day"])
     beta = _maybe_numpy(df["Beta_Effective"]) if "Beta_Effective" in df.columns else np.zeros_like(day)
@@ -362,17 +331,7 @@ def plot_beta_vs_seasonality(
     style: str = "scatter_line",
     color_by: str = "Day",
 ) -> None:
-    """XY plot of Beta_Effective (x) vs Seasonality (y).
-
-    Parameters
-    ----------
-    style : {'scatter_line', 'scatter', 'line'}
-        * ``scatter_line`` (default) draws a light connecting line in addition to points.
-        * ``scatter`` plots only points.
-        * ``line`` plots only a line in temporal order.
-    color_by : column name used to color points (only for scatter_*)
-        Defaults to ``Day`` so early/late points are distinguishable.
-    """
+    
     ensure_dir(os.path.dirname(path))
     if 'Beta_Effective' not in df.columns or 'Seasonality' not in df.columns:
         print('[WARN] plot_beta_vs_seasonality: required columns missing; skipping.')
@@ -407,15 +366,9 @@ def plot_beta_vs_seasonality(
     plt.close(fig)
 
 
-# ------------------------------------------------------------------
-# 8. Circular / Radial Seasonality Plot
-# ------------------------------------------------------------------
 
 def plot_radial_seasonality(df: pd.DataFrame, path: str, period: int | None = None) -> None:
-    """Polar plot showing seasonality (and scaled infections) over a cycle.
-
-    period : length of full seasonal cycle in days; inferred from data if None.
-    """
+    
     ensure_dir(os.path.dirname(path))
     day = _maybe_numpy(df["Day"]).astype(float)
     if period is None:
@@ -439,9 +392,6 @@ def plot_radial_seasonality(df: pd.DataFrame, path: str, period: int | None = No
     plt.close(fig)
 
 
-# ------------------------------------------------------------------
-# 9. Beta vs Cases Scatter (colored by Day)
-# ------------------------------------------------------------------
 
 def plot_beta_vs_cases(df: pd.DataFrame, path: str) -> None:
     """Scatter Beta_Effective vs New_Infections colored by Day."""
@@ -462,10 +412,6 @@ def plot_beta_vs_cases(df: pd.DataFrame, path: str) -> None:
     fig.savefig(path, dpi=300)
     plt.close(fig)
 
-
-# ------------------------------------------------------------------
-# Convenience: generate everything available
-# ------------------------------------------------------------------
 
 def save_all_advanced_plots(df: pd.DataFrame, out_dir: str) -> None:
     """Generate a suite of advanced plots for the given dataframe."""
